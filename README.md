@@ -9,6 +9,7 @@ and the browser receives live messages over Server-Sent Events.
 - Account registration, login, and cookie-based sessions
 - Invite-only registration after the first account
 - Communities and text channels
+- Authorized member lists with owner indicators
 - Persistent messages
 - Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit)
 - Live message delivery with automatic reconnect

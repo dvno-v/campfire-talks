@@ -24,6 +24,7 @@ from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
+from .services.communities import list_community_members
 from .uploads import detect_image_type, safe_original_name
 
 class App(BaseHTTPRequestHandler):
@@ -122,6 +123,8 @@ class App(BaseHTTPRequestHandler):
             return self.bootstrap()
         if path == "/api/events":
             return self.events()
+        if path.startswith("/api/communities/") and path.endswith("/members"):
+            return self.community_members(path)
         if path.startswith("/api/attachments/"):
             return self.serve_attachment(path)
         if path.startswith("/api/channels/") and path.endswith("/messages"):
@@ -260,6 +263,20 @@ class App(BaseHTTPRequestHandler):
             channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                     (community_id, "general", utc_now())).lastrowid
         self.send_json({"id": community_id, "name": name, "channels": [{"id": channel_id, "name": "general"}]}, HTTPStatus.CREATED)
+
+    def community_members(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            community_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
+        with connect() as database:
+            members = list_community_members(database, community_id, user["id"])
+        if members is None:
+            return self.error(HTTPStatus.NOT_FOUND, "Community not found")
+        self.send_json({"members": members})
 
     def create_channel(self):
         user = self.require_user()

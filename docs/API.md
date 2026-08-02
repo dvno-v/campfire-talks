@@ -49,6 +49,13 @@ Returns the signed-in user and every community/channel they may access.
 
 ## Communities and channels
 
+### `GET /api/communities/{community_id}/members`
+
+Returns public member objects containing `id`, `username`, and either the
+`owner` or `member` role. The owner is sorted first. Callers who are not current
+members receive `404`, which avoids confirming whether a private community
+exists.
+
 ### `POST /api/communities`
 
 ```json

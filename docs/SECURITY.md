@@ -29,6 +29,8 @@ encrypted. A compromised host, browser, or administrator can read them.
   sniffing, disable indexing, and restrict camera, microphone, and display
   capture to the application origin.
 - Every channel read, write, and live event verifies community membership.
+- Community member lists verify the requesting actor's current membership and
+  return `404` to outsiders rather than revealing whether a community exists.
 - Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
   validation, random non-user-controlled storage names, and private authorized
   retrieval. SVG and arbitrary documents are rejected.

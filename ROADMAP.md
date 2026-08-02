@@ -23,7 +23,8 @@ Status: in progress
 - [x] Communities, owner-managed channels, and membership authorization
 - [x] Persistent text chat and authorized live delivery
 - [x] Authorized PNG/JPEG/GIF/WebP sharing with bounded private storage
-- [ ] Member list and online presence
+- [x] Member list with owner indicators
+- [ ] Online presence
 - [ ] Message edit/delete with clear ownership rules
 - [ ] Owner invite list and immediate invite revocation
 - [ ] Unread markers and basic notification preferences
@@ -79,14 +80,6 @@ direct UDP and TURN fallback, and the documented encryption claims are verified.
 - Optional push notifications with an honest third-party metadata warning
 - Installable PWA and accessibility/keyboard review
 - Import/export format with no dependency on Campfire infrastructure
-
-## Deferred or explicit non-goals
-
-- Public server directory, algorithmic feeds, advertisements, growth analytics
-- Bots that can silently read every channel
-- Federation before authorization and identity semantics are mature
-- Kubernetes or microservices for a single-host friend-group installation
-- Claims of server-blind text privacy before genuine audited E2EE exists
 
 ## Security gate for every feature
 

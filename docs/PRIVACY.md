@@ -18,6 +18,10 @@ Raw passwords and raw invite codes are never stored. Campfire does not persist
 IP addresses. Authentication rate-limit state exists only in memory for five
 minutes.
 
+Members of the same community can see one another's username, internal user ID,
+and whether a person owns that community. The member-list feature adds no new
+persistent data beyond existing accounts and memberships.
+
 Images are stored under `data/uploads` by default using random server-generated
 names. The original filename, detected media type, byte size, uploader, and
 channel are stored in SQLite. Image metadata inside the uploaded bytes (for

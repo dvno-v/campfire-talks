@@ -8,6 +8,7 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, security, uploads
+from campfire.services.communities import list_community_members
 
 
 class CampfireTests(unittest.TestCase):
@@ -55,6 +56,24 @@ class CampfireTests(unittest.TestCase):
             stored = db.execute("SELECT token_hash FROM invitations").fetchone()[0]
         self.assertEqual(invite["community_id"], community_id)
         self.assertNotEqual(stored, token)
+
+    def test_member_list_marks_owner_and_hides_from_outsiders(self):
+        with database.connect() as db:
+            owner_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("member_owner", "unused", database.utc_now())).lastrowid
+            member_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                   ("regular_member", "unused", database.utc_now())).lastrowid
+            outsider_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                     ("member_outsider", "unused", database.utc_now())).lastrowid
+            community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                      ("Member Test", owner_id, database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, member_id))
+            visible = list_community_members(db, community_id, member_id)
+            hidden = list_community_members(db, community_id, outsider_id)
+        self.assertEqual([member["role"] for member in visible], ["owner", "member"])
+        self.assertEqual(visible[0]["id"], owner_id)
+        self.assertIsNone(hidden)
 
     def test_rate_limiter_window(self):
         limiter = security.RateLimiter(attempts=2, window=10)

@@ -12,7 +12,8 @@ server.py                 development/process entry point
           ├── database.py SQLite schema, migration, connections, serializers
           ├── security.py password/session/invite primitives and rate limits
           ├── uploads.py  hostile image-name and file-signature validation
-          └── realtime.py in-process live-event fan-out
+          ├── realtime.py in-process live-event fan-out
+          └── services/   actor-authorized domain queries and workflows
 
 static/                   dependency-free browser client
 tests/                    owning-module unit tests
@@ -54,9 +55,9 @@ separate self-hosted SFU.
 
 ## Next structural step
 
-`campfire/http.py` intentionally remains the composition point, but its route
-methods will be moved into `services/accounts.py`, `services/communities.py`,
-and `services/messages.py` as role management and deletion workflows arrive.
+`campfire/http.py` intentionally remains the composition point. Community
+member lookup is the first extracted domain service; account and message
+workflows will follow as role management and deletion arrive.
 Those service functions should accept an explicit database connection and
 actor identity, making authorization testable without opening a socket.
 

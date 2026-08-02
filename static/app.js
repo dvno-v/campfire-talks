@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { user: null, communities: [], community: null, channel: null, eventSource: null };
+const state = { user: null, communities: [], community: null, channel: null, members: [], eventSource: null };
 let registering = false;
 
 async function api(path, options = {}) {
@@ -34,10 +34,25 @@ function renderCommunities() {
 
 function selectCommunity(community) {
   state.community = community; $('#community-name').textContent = community?.name || 'Campfire'; renderCommunities();
+  state.members = []; renderMembers();
   $('#channels').innerHTML = (community?.channels || []).map(c => `<button class="channel" data-id="${c.id}">${escapeHTML(c.name)}</button>`).join('');
   document.querySelectorAll('.channel').forEach(button => button.onclick = () => selectChannel(community.channels.find(c => c.id === +button.dataset.id)));
   selectChannel(community?.channels[0]);
+  if (community) loadMembers(community.id);
 }
+
+async function loadMembers(communityId) {
+  try { const data=await api(`/api/communities/${communityId}/members`); if(state.community?.id!==communityId)return; state.members=data.members; renderMembers(); decorateOwnerIndicators(); }
+  catch(error) { if(state.community?.id===communityId) $('#member-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; }
+}
+
+function renderMembers() {
+  $('#member-count').textContent = state.members.length;
+  $('#member-list').innerHTML = state.members.length ? state.members.map(member => `<article class="member-row"><div class="member-avatar">${escapeHTML(initials(member.username))}</div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${member.role==='owner'?'<span class="member-role">OWNER</span>':''}</div></article>`).join('') : '<p class="member-empty">Loading members…</p>';
+}
+
+function isOwner(userId) { return state.members.some(member => member.id===Number(userId) && member.role==='owner'); }
+function decorateOwnerIndicators() { document.querySelectorAll('.message-row').forEach(row => { const meta=row.querySelector('.message-meta'); const existing=meta.querySelector('.owner-indicator'); if(isOwner(row.dataset.authorId) && !existing) meta.querySelector('strong').insertAdjacentHTML('afterend','<span class="owner-indicator">OWNER</span>'); else if(!isOwner(row.dataset.authorId)) existing?.remove(); }); }
 
 async function selectChannel(channel) {
   state.channel = channel;
@@ -50,10 +65,10 @@ async function selectChannel(channel) {
 }
 
 function appendMessage(message) {
-  const row = document.createElement('article'); row.className = 'message-row'; row.dataset.messageId = message.id;
+  const row = document.createElement('article'); row.className = 'message-row'; row.dataset.messageId = message.id; row.dataset.authorId = message.author_id;
   const date = new Date(message.created_at);
   const attachment = message.attachment ? `<a class="message-attachment" href="/api/attachments/${Number(message.attachment.id)}" target="_blank" rel="noopener"><img src="/api/attachments/${Number(message.attachment.id)}" alt="${escapeHTML(message.attachment.name)}" loading="lazy"><span>${escapeHTML(message.attachment.name)} · ${formatBytes(message.attachment.byte_size)}</span></a>` : '';
-  row.innerHTML = `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong><time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time></div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>`;
+  row.innerHTML = `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${isOwner(message.author_id)?'<span class="owner-indicator">OWNER</span>':''}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time></div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>`;
   $('#messages').append(row); scrollMessages();
 }
 function scrollMessages() { const list = $('#messages'); list.scrollTop = list.scrollHeight; }
@@ -66,6 +81,8 @@ $('#message-form').onsubmit = sendMessage;
 $('#message').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(event); } };
 async function sendMessage(event) { event.preventDefault(); const input=$('#message'), body=input.value.trim(); if(!body || !state.channel)return; input.value=''; try { const message=await api(`/api/channels/${state.channel.id}/messages`,{method:'POST',body:JSON.stringify({body})}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){ input.value=body; alert(error.message); } }
 $('#upload-button').onclick = () => state.channel && $('#file-input').click();
+$('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-width: 1100px)').matches; if(compact) $('#members-panel').classList.toggle('open'); else $('#app').classList.toggle('members-hidden'); const visible=compact?$('#members-panel').classList.contains('open'):!$('#app').classList.contains('members-hidden'); $('#toggle-members').setAttribute('aria-expanded',String(visible)); };
+$('#close-members').onclick = () => { $('#members-panel').classList.remove('open'); $('#toggle-members').setAttribute('aria-expanded','false'); };
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };

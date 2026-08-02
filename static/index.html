@@ -6,6 +6,7 @@
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/attachments.css">
   <link rel="stylesheet" href="/layout.css">
+  <link rel="stylesheet" href="/members.css">
 </head>
 <body>
   <main id="auth" class="auth-shell">
@@ -32,10 +33,14 @@
       <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
     </aside>
     <section class="chat">
-      <header class="chat-header"><b>#</b><strong id="channel-name">general</strong><span>A place to talk</span></header>
+      <header class="chat-header"><b>#</b><strong id="channel-name">general</strong><span>A place to talk</span><button id="toggle-members" class="members-toggle" type="button" aria-expanded="true">People <output id="member-count">0</output></button></header>
       <div id="messages" class="messages"><div class="empty"><div>#</div><h2>Welcome</h2><p>This is the beginning of the channel.</p></div></div>
       <form id="message-form" class="composer"><button id="upload-button" type="button" title="Share an image">+</button><input id="file-input" class="hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><textarea id="message" rows="1" maxlength="4000" placeholder="Message #general"></textarea><span>↵</span></form>
     </section>
+    <aside id="members-panel" class="members-panel">
+      <header><strong>Members</strong><button id="close-members" type="button" aria-label="Close member list">×</button></header>
+      <div id="member-list" class="member-list"></div>
+    </aside>
   </main>
   <script src="/app.js"></script>
 </body>
