@@ -75,7 +75,43 @@
   font-weight: 900;
   height: 36px;
   justify-content: center;
+  position: relative;
   width: 36px;
+}
+
+.member-group {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  margin: 14px 0 4px;
+  padding: 0 8px;
+}
+
+.member-group:first-child {
+  margin-top: 0;
+}
+
+.presence-dot {
+  border: 2px solid var(--panel);
+  border-radius: 50%;
+  bottom: -1px;
+  height: 11px;
+  position: absolute;
+  right: -1px;
+  width: 11px;
+}
+
+.member-row.online .presence-dot {
+  background: #57cc8a;
+}
+
+.member-row.offline .presence-dot {
+  background: #6b6c78;
+}
+
+.member-row.offline {
+  opacity: 0.55;
 }
 
 .member-identity {

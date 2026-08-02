@@ -3,8 +3,12 @@
 import time
 
 
-def list_community_members(database, community_id, actor_id):
-    """Return public member data, or None when the actor is not a member."""
+def list_community_members(database, community_id, actor_id, online_ids=frozenset()):
+    """Return public member data, or None when the actor is not a member.
+
+    Presence lives in memory, so the caller supplies the currently connected
+    user IDs rather than this query reading them from storage.
+    """
     allowed = database.execute(
         "SELECT 1 FROM memberships WHERE community_id=? AND user_id=?",
         (community_id, actor_id),
@@ -21,7 +25,20 @@ def list_community_members(database, community_id, actor_id):
       WHERE m.community_id=?
       ORDER BY CASE WHEN c.owner_id=u.id THEN 0 ELSE 1 END, u.username COLLATE NOCASE
     """, (community_id,)).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row) | {"online": row["id"] in online_ids} for row in rows]
+
+
+def shares_community(database, user_id, other_id):
+    """True when two accounts have at least one community in common.
+
+    Presence is only disclosed across an existing shared membership, so being
+    connected is never observable by strangers.
+    """
+    return database.execute("""
+      SELECT 1 FROM memberships mine
+      JOIN memberships theirs ON theirs.community_id=mine.community_id
+      WHERE mine.user_id=? AND theirs.user_id=? LIMIT 1
+    """, (user_id, other_id)).fetchone() is not None
 
 
 def list_active_invites(database, community_id, actor_id, timestamp=None):

@@ -22,6 +22,13 @@ Members of the same community can see one another's username, internal user ID,
 and whether a person owns that community. The member-list feature adds no new
 persistent data beyond existing accounts and memberships.
 
+Presence is derived from open event streams and held only in memory. Campfire
+records no last-seen time, no session history, and no connection log, so there
+is nothing to disclose about when you were here before now — restarting the
+server erases presence entirely. Whether you are currently connected is visible
+to people who already share a community with you, and to nobody else. There is
+no way to appear offline yet; if that matters to you, close the tab.
+
 Only a community owner can list its active invite metadata. Campfire cannot
 display a previously created raw code because only its digest is retained;
 revocation deletes that digest and its usage metadata immediately.

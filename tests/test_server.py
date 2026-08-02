@@ -8,8 +8,9 @@ from pathlib import Path
 temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
-from campfire import database, security, uploads
+from campfire import database, realtime, security, uploads
 from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
+from campfire.services.communities import shares_community
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 
 
@@ -173,6 +174,59 @@ class CampfireTests(unittest.TestCase):
         with database.connect() as db:
             actors, message_id = self.message_fixture(db, "text_delete")
             self.assertIsNone(remove_message(db, visible_message(db, message_id, actors["author"])))
+
+    def test_presence_tracks_the_first_and_last_stream_per_user(self):
+        """One person often has several tabs open; only the edges change presence."""
+        broker = realtime.Broker()
+        first, became_online = broker.subscribe(7)
+        self.assertTrue(became_online)
+        second, became_online = broker.subscribe(7)
+        self.assertFalse(became_online)
+        self.assertEqual(broker.online_user_ids(), frozenset({7}))
+
+        user_id, went_offline = broker.unsubscribe(first)
+        self.assertEqual(user_id, 7)
+        self.assertFalse(went_offline)
+        self.assertEqual(broker.online_user_ids(), frozenset({7}))
+
+        _, went_offline = broker.unsubscribe(second)
+        self.assertTrue(went_offline)
+        self.assertEqual(broker.online_user_ids(), frozenset())
+        self.assertEqual(broker.unsubscribe(second), (None, False))
+
+    def test_presence_is_only_visible_across_a_shared_community(self):
+        with database.connect() as db:
+            actors = {}
+            for role in ("resident", "neighbour", "stranger"):
+                actors[role] = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                          (f"presence_{role}", "unused", database.utc_now())).lastrowid
+            shared = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                ("Shared", actors["resident"], database.utc_now())).lastrowid
+            elsewhere = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                   ("Elsewhere", actors["stranger"], database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships VALUES(?,?)", (shared, actors["resident"]))
+            db.execute("INSERT INTO memberships VALUES(?,?)", (shared, actors["neighbour"]))
+            db.execute("INSERT INTO memberships VALUES(?,?)", (elsewhere, actors["stranger"]))
+
+            self.assertTrue(shares_community(db, actors["resident"], actors["neighbour"]))
+            self.assertTrue(shares_community(db, actors["resident"], actors["resident"]))
+            self.assertFalse(shares_community(db, actors["resident"], actors["stranger"]))
+
+    def test_member_list_reports_who_is_connected(self):
+        with database.connect() as db:
+            owner_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("presence_owner", "unused", database.utc_now())).lastrowid
+            absent_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                   ("presence_absent", "unused", database.utc_now())).lastrowid
+            community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                      ("Presence", owner_id, database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, absent_id))
+            members = list_community_members(db, community_id, owner_id, frozenset({owner_id}))
+            without_presence = list_community_members(db, community_id, owner_id)
+        self.assertEqual({member["username"]: member["online"] for member in members},
+                         {"presence_owner": True, "presence_absent": False})
+        self.assertTrue(all(member["online"] is False for member in without_presence))
 
     def test_rate_limiter_window(self):
         limiter = security.RateLimiter(attempts=2, window=10)

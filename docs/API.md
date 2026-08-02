@@ -51,10 +51,14 @@ Returns the signed-in user and every community/channel they may access.
 
 ### `GET /api/communities/{community_id}/members`
 
-Returns public member objects containing `id`, `username`, and either the
-`owner` or `member` role. The owner is sorted first. Callers who are not current
-members receive `404`, which avoids confirming whether a private community
-exists.
+Returns public member objects containing `id`, `username`, `online`, and either
+the `owner` or `member` role. The owner is sorted first. Callers who are not
+current members receive `404`, which avoids confirming whether a private
+community exists.
+
+`online` is true while that account holds at least one open `/api/events`
+stream. It is computed in memory at request time and never stored, so it resets
+to false for everyone when the process restarts.
 
 ### `POST /api/communities`
 
@@ -166,9 +170,17 @@ Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
 | `message.created` | the new message object |
 | `message.updated` | the edited message object, including `edited_at` |
 | `message.deleted` | `id` and `channel_id` only |
+| `presence.online` | `user_id`, sent when that account opens its first stream |
+| `presence.offline` | `user_id`, sent when its last stream closes |
 
-The server checks the connected user’s channel membership again before sending
-each event and emits a keepalive every 20 seconds.
+Message events reach members of the channel's community. Presence events reach
+only accounts that share a community with the subject, so being connected is
+never observable by strangers. Both are re-checked per event, because
+membership can change while a stream is open.
+
+The server emits a keepalive every 20 seconds. That write is also how it
+discovers a client that vanished without closing cleanly, so `presence.online`
+is immediate but `presence.offline` can lag by up to one keepalive interval.
 
 ## Browser request protection
 

@@ -24,7 +24,7 @@ from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
-from .services.communities import list_active_invites, list_community_members
+from .services.communities import list_active_invites, list_community_members, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .uploads import detect_image_type, safe_original_name
@@ -323,7 +323,7 @@ class App(BaseHTTPRequestHandler):
         except (ValueError, IndexError):
             return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
         with connect() as database:
-            members = list_community_members(database, community_id, user["id"])
+            members = list_community_members(database, community_id, user["id"], BROKER.online_user_ids())
         if members is None:
             return self.error(HTTPStatus.NOT_FOUND, "Community not found")
         self.send_json({"members": members})
@@ -619,19 +619,19 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        channel = BROKER.subscribe()
+        channel, became_online = BROKER.subscribe(user["id"])
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
+        if became_online:
+            BROKER.publish({"type": "presence.online", "user_id": user["id"]})
         try:
             while True:
                 try:
                     event = channel.get(timeout=20)
-                    with connect() as db:
-                        allowed = self.member_channel(db, event["channel_id"], user["id"])
-                    if not allowed:
+                    if not self.event_visible_to(event, user):
                         continue
                     payload = f"data: {json.dumps(event)}\n\n".encode()
                 except queue.Empty:
@@ -641,7 +641,16 @@ class App(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
-            BROKER.unsubscribe(channel)
+            _, went_offline = BROKER.unsubscribe(channel)
+            if went_offline:
+                BROKER.publish({"type": "presence.offline", "user_id": user["id"]})
+
+    def event_visible_to(self, event, user):
+        """Re-check authorization per event, since membership can change mid-stream."""
+        with connect() as db:
+            if event["type"].startswith("presence."):
+                return shares_community(db, event["user_id"], user["id"])
+            return bool(self.member_channel(db, event["channel_id"], user["id"]))
 
     def static_file(self, path):
         relative = "index.html" if path == "/" else path.lstrip("/")

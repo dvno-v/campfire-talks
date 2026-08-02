@@ -43,6 +43,8 @@ encrypted. A compromised host, browser, or administrator can read them.
   sniffing, disable indexing, and restrict camera, microphone, and display
   capture to the application origin.
 - Every channel read, write, and live event verifies community membership.
+- Presence is disclosed only across an existing shared community, is derived
+  from open streams rather than stored, and records no last-seen time.
 - Editing a message requires authorship; deleting one requires authorship or
   ownership of its community. Ownership deliberately does not grant the right to
   rewrite another member's words, only to remove them. Non-members receive
@@ -68,7 +70,7 @@ standard library also recommends salted, tunably slow password derivation:
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
 - There is no multi-factor authentication, password reset, session management
-  screen, account deletion, or moderator role model. Deletion is currently the
+  screen, account deletion, invisible-mode preference, or moderator role model. Deletion is currently the
   only moderation action, and only the community owner has it.
 - Messages are not end-to-end encrypted and are retained until someone deletes
   them. Deletion does not reach backups taken beforehand.

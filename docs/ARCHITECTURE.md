@@ -12,7 +12,7 @@ server.py                 development/process entry point
           ├── database.py SQLite schema, migration, connections, serializers
           ├── security.py password/session/invite primitives and rate limits
           ├── uploads.py  hostile image-name and file-signature validation
-          ├── realtime.py in-process live-event fan-out
+          ├── realtime.py in-process live-event fan-out and derived presence
           └── services/   actor-authorized domain queries and workflows
 
 static/                   dependency-free browser client

@@ -24,7 +24,7 @@ Status: in progress
 - [x] Persistent text chat and authorized live delivery
 - [x] Authorized PNG/JPEG/GIF/WebP sharing with bounded private storage
 - [x] Member list with owner indicators
-- [ ] Online presence
+- [x] Online presence
 - [x] Message edit/delete with clear ownership rules
 - [x] Owner invite list and immediate invite revocation
 - [ ] Unread markers and basic notification preferences

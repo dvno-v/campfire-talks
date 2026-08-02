@@ -5,6 +5,7 @@ the server accepts, and how many responses a request produces — is invisible t
 tests that only call service functions.
 """
 
+import contextlib
 import hashlib
 import http.client
 import json
@@ -87,6 +88,31 @@ class HTTPTests(unittest.TestCase):
             db.execute("INSERT INTO sessions VALUES(?,?,?)",
                        (security.session_hash(token), user_id, int(time.time()) + 600))
         return token
+
+    def user_id_for(self, username):
+        with database.connect() as db:
+            return db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
+
+    @contextlib.contextmanager
+    def event_stream(self, cookie):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+        connection.request("GET", "/api/events", headers={"Cookie": f"campfire_session={cookie}"})
+        try:
+            yield connection.getresponse()
+        finally:
+            connection.close()
+
+    def await_event(self, stream, matches, timeout=6):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            line = stream.fp.readline()
+            if not line:
+                return None
+            if line.startswith(b"data: "):
+                event = json.loads(line[6:])
+                if matches(event):
+                    return event
+        return None
 
     def post_message(self, cookie, body="original text"):
         status, message, _ = self.request("POST", f"/api/channels/{self.channel_id}/messages",
@@ -196,6 +222,26 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 404, "outsiders must not learn that the message exists")
         status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=author)
         self.assertEqual(status, 200)
+
+    def test_a_community_peer_is_told_when_someone_connects(self):
+        watcher = self.signed_in_user("presence_watcher")
+        joiner = self.signed_in_user("presence_joiner")
+        joiner_id = self.user_id_for("presence_joiner")
+        with self.event_stream(watcher) as stream:
+            time.sleep(0.3)  # let the watcher's own subscription register first
+            with self.event_stream(joiner):
+                event = self.await_event(stream, lambda e: e.get("user_id") == joiner_id)
+        self.assertIsNotNone(event, "the peer never received a presence event")
+        self.assertEqual(event["type"], "presence.online")
+
+    def test_the_member_list_reports_an_open_stream_as_online(self):
+        viewer = self.signed_in_user("presence_viewer")
+        with self.event_stream(viewer):
+            time.sleep(0.3)
+            _, payload, _ = self.request("GET", f"/api/communities/{self.community_id}/members", cookie=viewer)
+        online = {member["username"] for member in payload["members"] if member["online"]}
+        self.assertIn("presence_viewer", online)
+        self.assertNotIn("http_owner", online, "an account with no open stream must read as offline")
 
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")

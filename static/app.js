@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { user: null, communities: [], community: null, channel: null, members: [], messages: new Map(), eventSource: null };
+const state = { user: null, communities: [], community: null, channel: null, members: [], online: new Set(), messages: new Map(), eventSource: null };
 let registering = false;
 
 async function api(path, options = {}) {
@@ -21,15 +21,19 @@ async function enterApp() {
   $('#auth').classList.add('hidden'); $('#app').classList.remove('hidden');
   $('#current-user').textContent = state.user.username;
   $('#avatar').textContent = initials(state.user.username);
-  selectCommunity(state.communities[0]);
   state.eventSource?.close(); state.eventSource = new EventSource('/api/events');
+  // The member list reports who is connected, so re-read it once this stream is
+  // registered — on first open and again after any automatic reconnect.
+  state.eventSource.onopen = () => { if (state.community) loadMembers(state.community.id); };
   state.eventSource.onmessage = ({ data }) => {
     const event = JSON.parse(data);
+    if (event.type.startsWith('presence.')) return applyPresence(event);
     if (event.channel_id !== state.channel?.id) return;
     if (event.type === 'message.deleted') return removeMessage(event.id);
     if (event.type === 'message.updated') return replaceMessage(event);
     if (!document.querySelector(`[data-message-id="${Number(event.id)}"]`)) appendMessage(event);
   };
+  selectCommunity(state.communities[0]);
 }
 
 function renderCommunities() {
@@ -53,14 +57,27 @@ function renderChannels() {
 }
 
 async function loadMembers(communityId) {
-  try { const data=await api(`/api/communities/${communityId}/members`); if(state.community?.id!==communityId)return; state.members=data.members; renderMembers(); refreshMessages(); }
+  try { const data=await api(`/api/communities/${communityId}/members`); if(state.community?.id!==communityId)return; state.members=data.members; state.online=new Set(data.members.filter(member=>member.online).map(member=>member.id)); renderMembers(); refreshMessages(); }
   catch(error) { if(state.community?.id===communityId) $('#member-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; }
+}
+
+function memberRow(member) {
+  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${member.role==='owner'?'<span class="member-role">OWNER</span>':''}</div></article>`;
 }
 
 function renderMembers() {
   $('#member-count').textContent = state.members.length;
   $('#invite-friend').classList.toggle('hidden', !isOwner(state.user?.id));
-  $('#member-list').innerHTML = state.members.length ? state.members.map(member => `<article class="member-row"><div class="member-avatar">${escapeHTML(initials(member.username))}</div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${member.role==='owner'?'<span class="member-role">OWNER</span>':''}</div></article>`).join('') : '<p class="member-empty">Loading members…</p>';
+  if (!state.members.length) { $('#member-list').innerHTML = '<p class="member-empty">Loading members…</p>'; return; }
+  const groups = [['ONLINE', state.members.filter(m => state.online.has(m.id))], ['OFFLINE', state.members.filter(m => !state.online.has(m.id))]];
+  $('#member-list').innerHTML = groups.filter(([, members]) => members.length)
+    .map(([label, members]) => `<div class="member-group">${label} — ${members.length}</div>${members.map(memberRow).join('')}`).join('');
+}
+
+function applyPresence(event) {
+  const userId = Number(event.user_id);
+  if (event.type === 'presence.online') state.online.add(userId); else state.online.delete(userId);
+  if (state.members.some(member => member.id === userId)) renderMembers();
 }
 
 function isOwner(userId) { return state.members.some(member => member.id===Number(userId) && member.role==='owner'); }
