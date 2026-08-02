@@ -3,17 +3,21 @@
 import time
 
 
+def is_member(database, community_id, actor_id):
+    """True when the actor currently belongs to the community."""
+    return database.execute(
+        "SELECT 1 FROM memberships WHERE community_id=? AND user_id=?",
+        (community_id, actor_id),
+    ).fetchone() is not None
+
+
 def list_community_members(database, community_id, actor_id, online_ids=frozenset()):
     """Return public member data, or None when the actor is not a member.
 
     Presence lives in memory, so the caller supplies the currently connected
     user IDs rather than this query reading them from storage.
     """
-    allowed = database.execute(
-        "SELECT 1 FROM memberships WHERE community_id=? AND user_id=?",
-        (community_id, actor_id),
-    ).fetchone()
-    if not allowed:
+    if not is_member(database, community_id, actor_id):
         return None
 
     rows = database.execute("""

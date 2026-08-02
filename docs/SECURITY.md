@@ -45,6 +45,9 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Every channel read, write, and live event verifies community membership.
 - Presence is disclosed only across an existing shared community, is derived
   from open streams rather than stored, and records no last-seen time.
+- Arrival and channel-creation events are delivered only to members of the
+  community they concern, re-checked per event rather than trusted from the
+  moment the stream opened.
 - Editing a message requires authorship; deleting one requires authorship or
   ownership of its community. Ownership deliberately does not grant the right to
   rewrite another member's words, only to remove them. Non-members receive

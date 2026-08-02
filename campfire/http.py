@@ -11,6 +11,8 @@ import os
 import queue
 import re
 import secrets
+import select
+import socket
 import sqlite3
 import time
 from http import HTTPStatus
@@ -24,10 +26,14 @@ from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
-from .services.communities import list_active_invites, list_community_members, shares_community
+from .services.communities import is_member, list_active_invites, list_community_members, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .uploads import detect_image_type, safe_original_name
+
+KEEPALIVE_SECONDS = 20
+DISCONNECT_POLL_SECONDS = 2
+
 
 class InvalidBody(Exception):
     """Raised once a malformed request body has already been answered.
@@ -243,7 +249,15 @@ class App(BaseHTTPRequestHandler):
                                (community, "general", utc_now()))
         except sqlite3.IntegrityError:
             return self.error(HTTPStatus.CONFLICT, "That username is already taken")
+        if invitation:
+            self.announce_member(invitation["community_id"], user_id, username)
         return self.start_session(user_id, username, HTTPStatus.CREATED)
+
+    def announce_member(self, community_id, user_id, username):
+        """Tell the community about an arrival so member lists update in place."""
+        BROKER.publish({"type": "member.joined", "community_id": community_id,
+                        "member": {"id": user_id, "username": username,
+                                   "role": "member", "online": False}})
 
     def login(self):
         body = self.json_body()
@@ -363,6 +377,8 @@ class App(BaseHTTPRequestHandler):
                                         (community_id, name, utc_now())).lastrowid
             except sqlite3.IntegrityError:
                 return self.error(HTTPStatus.CONFLICT, "That channel already exists")
+        BROKER.publish({"type": "channel.created", "community_id": community_id,
+                        "id": channel_id, "name": name})
         self.send_json({"id": channel_id, "name": name}, HTTPStatus.CREATED)
 
     def create_invite(self):
@@ -422,6 +438,7 @@ class App(BaseHTTPRequestHandler):
             if updated.rowcount != 1:
                 return self.error(HTTPStatus.CONFLICT, "Invite is fully used")
             db.execute("INSERT INTO memberships VALUES(?,?)", (invitation["community_id"], user["id"]))
+        self.announce_member(invitation["community_id"], user["id"], user["username"])
         self.send_json({"id": invitation["community_id"], "name": invitation["community_name"]},
                        HTTPStatus.CREATED)
 
@@ -627,17 +644,26 @@ class App(BaseHTTPRequestHandler):
         self.end_headers()
         if became_online:
             BROKER.publish({"type": "presence.online", "user_id": user["id"]})
+        last_keepalive = time.time()
         try:
             while True:
                 try:
-                    event = channel.get(timeout=20)
-                    if not self.event_visible_to(event, user):
-                        continue
-                    payload = f"data: {json.dumps(event)}\n\n".encode()
+                    event = channel.get(timeout=DISCONNECT_POLL_SECONDS)
                 except queue.Empty:
-                    payload = b": keepalive\n\n"
-                self.wfile.write(payload)
+                    # Watch for a closed peer here rather than waiting for a write to
+                    # fail, so someone leaving shows as offline in seconds.
+                    if self.client_disconnected():
+                        break
+                    if time.time() - last_keepalive >= KEEPALIVE_SECONDS:
+                        last_keepalive = time.time()
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    continue
+                if not self.event_visible_to(event, user):
+                    continue
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
                 self.wfile.flush()
+                last_keepalive = time.time()
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -645,11 +671,22 @@ class App(BaseHTTPRequestHandler):
             if went_offline:
                 BROKER.publish({"type": "presence.offline", "user_id": user["id"]})
 
+    def client_disconnected(self):
+        """True once the peer has closed its end of an idle stream."""
+        try:
+            readable, _, _ = select.select([self.connection], [], [], 0)
+            return bool(readable) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
+
     def event_visible_to(self, event, user):
         """Re-check authorization per event, since membership can change mid-stream."""
+        subject = event["type"].split(".")[0]
         with connect() as db:
-            if event["type"].startswith("presence."):
+            if subject == "presence":
                 return shares_community(db, event["user_id"], user["id"])
+            if subject in {"member", "channel"}:
+                return is_member(db, event["community_id"], user["id"])
             return bool(self.member_channel(db, event["channel_id"], user["id"]))
 
     def static_file(self, path):

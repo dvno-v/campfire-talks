@@ -74,7 +74,8 @@ Creates an owned community with a `general` channel.
 {"community_id": 1, "name": "memes"}
 ```
 
-Only the community owner may create a channel.
+Only the community owner may create a channel. Members of that community are
+told over `/api/events`, so the channel appears without a reload.
 
 ## Invitations
 
@@ -108,7 +109,9 @@ and invites owned by another user both return `404`.
 {"invite": "the invite code"}
 ```
 
-Adds an existing account to the invitation’s community.
+Adds an existing account to the invitation’s community. Existing members are
+told over `/api/events`, so the arrival appears in their member list without a
+reload. Registering with an invite announces the same event.
 
 ## Messages
 
@@ -172,15 +175,20 @@ Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
 | `message.deleted` | `id` and `channel_id` only |
 | `presence.online` | `user_id`, sent when that account opens its first stream |
 | `presence.offline` | `user_id`, sent when its last stream closes |
+| `member.joined` | `community_id` and the new `member` object |
+| `channel.created` | `community_id`, `id`, and `name` |
 
-Message events reach members of the channel's community. Presence events reach
-only accounts that share a community with the subject, so being connected is
-never observable by strangers. Both are re-checked per event, because
-membership can change while a stream is open.
+Authorization is re-checked per event, because membership can change while a
+stream is open:
 
-The server emits a keepalive every 20 seconds. That write is also how it
-discovers a client that vanished without closing cleanly, so `presence.online`
-is immediate but `presence.offline` can lag by up to one keepalive interval.
+- message events reach members of the channel's community;
+- `member.*` and `channel.*` events reach members of `community_id`;
+- presence events reach only accounts that already share a community with the
+  subject, so being connected is never observable by strangers.
+
+The server emits a keepalive every 20 seconds and separately polls for a closed
+peer every two seconds, so a departure is announced in about two seconds rather
+than waiting for a failed keepalive write.
 
 ## Browser request protection
 

@@ -28,6 +28,8 @@ async function enterApp() {
   state.eventSource.onmessage = ({ data }) => {
     const event = JSON.parse(data);
     if (event.type.startsWith('presence.')) return applyPresence(event);
+    if (event.type === 'member.joined') return applyMemberJoined(event);
+    if (event.type === 'channel.created') return applyChannelCreated(event);
     if (event.channel_id !== state.channel?.id) return;
     if (event.type === 'message.deleted') return removeMessage(event.id);
     if (event.type === 'message.updated') return replaceMessage(event);
@@ -52,7 +54,7 @@ function selectCommunity(community) {
 
 function renderChannels() {
   const community = state.community;
-  $('#channels').innerHTML = (community?.channels || []).map(c => `<button class="channel" data-id="${c.id}">${escapeHTML(c.name)}</button>`).join('');
+  $('#channels').innerHTML = (community?.channels || []).map(c => `<button class="channel ${c.id === state.channel?.id ? 'active' : ''}" data-id="${c.id}">${escapeHTML(c.name)}</button>`).join('');
   document.querySelectorAll('.channel').forEach(button => button.onclick = () => selectChannel(community.channels.find(c => c.id === +button.dataset.id)));
 }
 
@@ -78,6 +80,26 @@ function applyPresence(event) {
   const userId = Number(event.user_id);
   if (event.type === 'presence.online') state.online.add(userId); else state.online.delete(userId);
   if (state.members.some(member => member.id === userId)) renderMembers();
+}
+
+// Owner first, then by name, matching the order the server returns.
+function sortMembers(members) {
+  return members.sort((a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1)
+    || a.username.localeCompare(b.username, undefined, { sensitivity: 'base' }));
+}
+
+function applyMemberJoined(event) {
+  if (event.community_id !== state.community?.id) return;
+  if (state.members.some(member => member.id === event.member.id)) return;
+  state.members = sortMembers([...state.members, event.member]);
+  renderMembers();
+}
+
+function applyChannelCreated(event) {
+  const community = state.communities.find(c => c.id === event.community_id);
+  if (!community || community.channels.some(channel => channel.id === event.id)) return;
+  community.channels.push({ id: event.id, name: event.name });
+  if (community.id === state.community?.id) renderChannels();
 }
 
 function isOwner(userId) { return state.members.some(member => member.id===Number(userId) && member.role==='owner'); }

@@ -94,8 +94,9 @@ class HTTPTests(unittest.TestCase):
             return db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
 
     @contextlib.contextmanager
-    def event_stream(self, cookie):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=8)
+    def event_stream(self, cookie, timeout=8):
+        """Open an SSE stream. The timeout also bounds how long await_event blocks."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         connection.request("GET", "/api/events", headers={"Cookie": f"campfire_session={cookie}"})
         try:
             yield connection.getresponse()
@@ -105,7 +106,10 @@ class HTTPTests(unittest.TestCase):
     def await_event(self, stream, matches, timeout=6):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            line = stream.fp.readline()
+            try:
+                line = stream.fp.readline()
+            except TimeoutError:
+                return None
             if not line:
                 return None
             if line.startswith(b"data: "):
@@ -233,6 +237,53 @@ class HTTPTests(unittest.TestCase):
                 event = self.await_event(stream, lambda e: e.get("user_id") == joiner_id)
         self.assertIsNotNone(event, "the peer never received a presence event")
         self.assertEqual(event["type"], "presence.online")
+
+    def test_a_departure_is_announced_without_waiting_for_a_keepalive(self):
+        watcher = self.signed_in_user("departure_watcher")
+        leaver = self.signed_in_user("departure_leaver")
+        leaver_id = self.user_id_for("departure_leaver")
+        with self.event_stream(watcher) as stream:
+            time.sleep(0.3)
+            leaving = socket.create_connection(("127.0.0.1", self.port), timeout=8)
+            leaving.sendall(b"GET /api/events HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                            + f"Cookie: campfire_session={leaver}\r\n\r\n".encode())
+            self.assertIsNotNone(self.await_event(stream, lambda e: e.get("user_id") == leaver_id))
+            leaving.close()
+            started = time.time()
+            event = self.await_event(stream, lambda e: e.get("type") == "presence.offline"
+                                     and e.get("user_id") == leaver_id, timeout=15)
+        self.assertIsNotNone(event, "departure never reached the peer")
+        self.assertLess(time.time() - started, 10, "departure should not wait for the 20s keepalive")
+
+    def test_arrivals_and_new_channels_reach_existing_members(self):
+        watcher = self.signed_in_user("liveupdate_watcher")
+        with self.event_stream(watcher) as stream:
+            time.sleep(0.3)
+            status, _, _ = self.request("POST", "/api/register", {
+                "username": "liveupdate_arrival", "password": PASSWORD, "invite": self.invite_token()})
+            self.assertEqual(status, 201)
+            joined = self.await_event(stream, lambda e: e.get("type") == "member.joined")
+            self.assertIsNotNone(joined, "existing members were not told about the arrival")
+            self.assertEqual(joined["member"]["username"], "liveupdate_arrival")
+            self.assertEqual(joined["member"]["role"], "member")
+            self.assertIs(joined["member"]["online"], False)
+
+            status, _, _ = self.request("POST", "/api/channels",
+                                        {"community_id": self.community_id, "name": "live-channel"},
+                                        cookie=self.owner_session)
+            self.assertEqual(status, 201)
+            created = self.await_event(stream, lambda e: e.get("type") == "channel.created")
+        self.assertIsNotNone(created, "existing members were not told about the new channel")
+        self.assertEqual(created["name"], "live-channel")
+
+    def test_community_events_stay_inside_the_community(self):
+        outsider = self.signed_in_user("liveupdate_outsider", member=False)
+        with self.event_stream(outsider, timeout=1.5) as stream:
+            time.sleep(0.3)
+            self.request("POST", "/api/channels", {"community_id": self.community_id, "name": "private-channel"},
+                         cookie=self.owner_session)
+            leaked = self.await_event(stream, lambda e: e.get("type") == "channel.created", timeout=1.5)
+        self.assertIsNone(leaked, "a non-member must not learn about another community's channels")
 
     def test_the_member_list_reports_an_open_stream_as_online(self):
         viewer = self.signed_in_user("presence_viewer")
