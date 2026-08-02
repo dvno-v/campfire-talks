@@ -24,6 +24,7 @@ os.environ.setdefault("CAMPFIRE_DB", str(Path(temporary.name) / "http.db"))
 os.environ.setdefault("CAMPFIRE_UPLOAD_DIR", str(Path(temporary.name) / "uploads"))
 
 from campfire import database, realtime, security
+from campfire import http as campfire_http
 from campfire.http import App
 
 PASSWORD = "a sufficiently long password"
@@ -295,6 +296,19 @@ class HTTPTests(unittest.TestCase):
                 subscription.missed.set()
             event = self.await_event(stream, lambda e: e.get("type") == "stream.reset", timeout=8)
         self.assertIsNotNone(event, "a stream that dropped events never told the client")
+
+    def test_an_extra_stream_is_refused_rather_than_exhausting_the_host(self):
+        original = campfire_http.MAX_EVENT_STREAMS_PER_USER
+        campfire_http.MAX_EVENT_STREAMS_PER_USER = 1
+        try:
+            user = self.signed_in_user("stream_limit_user")
+            with self.event_stream(user):
+                time.sleep(0.3)
+                status, payload, _ = self.request("GET", "/api/events", cookie=user)
+        finally:
+            campfire_http.MAX_EVENT_STREAMS_PER_USER = original
+        self.assertEqual(status, 503)
+        self.assertIn("Too many open connections", payload["error"])
 
     def test_the_member_list_reports_an_open_stream_as_online(self):
         viewer = self.signed_in_user("presence_viewer")

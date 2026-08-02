@@ -60,6 +60,8 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
   validation, random non-user-controlled storage names, and private authorized
   retrieval. SVG and arbitrary documents are rejected.
+- Live streams are bounded per host and per account, so opening connections
+  cannot exhaust threads and memory; past the limit Campfire answers `503`.
 - Access logging is disabled unless the operator explicitly enables it.
 
 The password parameters follow OWASP's PBKDF2-HMAC-SHA256 guidance. Python's

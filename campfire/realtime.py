@@ -30,10 +30,19 @@ class Broker:
         self._subscriptions = set()
         self._connections = Counter()
 
-    def subscribe(self, user_id):
-        """Register a stream, reporting whether it made the user newly online."""
+    def subscribe(self, user_id, max_total=None, max_per_user=None):
+        """Register a stream, reporting whether it made the user newly online.
+
+        Returns (None, False) when a limit is reached. The limits are enforced
+        under the lock so simultaneous connections cannot both pass a check that
+        only one of them should have.
+        """
         subscription = Subscription(user_id)
         with self._lock:
+            if max_total is not None and len(self._subscriptions) >= max_total:
+                return None, False
+            if max_per_user is not None and self._connections[user_id] >= max_per_user:
+                return None, False
             became_online = self._connections[user_id] == 0
             self._connections[user_id] += 1
             self._subscriptions.add(subscription)

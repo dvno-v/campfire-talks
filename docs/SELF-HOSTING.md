@@ -64,6 +64,13 @@ to encrypted storage with access restricted to the service account.
 public origin, without a trailing slash. Enabling secure cookies while browsing
 over plain HTTP will prevent sign-in from working.
 
+Each open `/api/events` stream costs one thread and one database connection for
+as long as it lasts, which is the current ceiling on concurrent users.
+`CAMPFIRE_MAX_EVENT_STREAMS` (default 200) and
+`CAMPFIRE_MAX_EVENT_STREAMS_PER_USER` (default 8) bound that cost: past either
+limit Campfire answers `503` instead of accepting work it cannot carry. Raising
+them raises real memory and thread use, so measure before doing so.
+
 `CAMPFIRE_MAX_UPLOAD_BYTES` controls the per-image limit and defaults to
 8,388,608 bytes. Back up and restore the database and upload directory as one
 consistent unit: the database contains authorization and filenames, while the

@@ -196,6 +196,31 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual(broker.online_user_ids(), frozenset())
         self.assertEqual(broker.unsubscribe(second), (None, False))
 
+    def test_stream_limits_are_enforced_and_released(self):
+        broker = realtime.Broker()
+        first, _ = broker.subscribe(1, max_total=3, max_per_user=2)
+        second, _ = broker.subscribe(1, max_total=3, max_per_user=2)
+        refused, _ = broker.subscribe(1, max_total=3, max_per_user=2)
+        self.assertIsNone(refused, "one account must not open unlimited streams")
+
+        other, _ = broker.subscribe(2, max_total=3, max_per_user=2)
+        self.assertIsNotNone(other, "a different account still has room")
+        self.assertIsNone(broker.subscribe(3, max_total=3, max_per_user=2)[0],
+                          "the host-wide limit must hold")
+
+        broker.unsubscribe(first)
+        self.assertIsNotNone(broker.subscribe(3, max_total=3, max_per_user=2)[0],
+                             "closing a stream must free its slot")
+        self.assertEqual(broker.stream_counts()[0], 3)
+
+    def test_a_refused_stream_does_not_mark_anyone_online(self):
+        broker = realtime.Broker()
+        broker.subscribe(1, max_total=1)
+        refused, became_online = broker.subscribe(2, max_total=1)
+        self.assertIsNone(refused)
+        self.assertFalse(became_online)
+        self.assertEqual(broker.online_user_ids(), frozenset({1}))
+
     def test_a_stream_that_falls_behind_is_flagged_rather_than_losing_events(self):
         broker = realtime.Broker()
         subscription, _ = broker.subscribe(1)

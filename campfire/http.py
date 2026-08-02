@@ -642,7 +642,14 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        subscription, became_online = BROKER.subscribe(user["id"])
+        subscription, became_online = BROKER.subscribe(user["id"], MAX_EVENT_STREAMS,
+                                                       MAX_EVENT_STREAMS_PER_USER)
+        if subscription is None:
+            # Every stream costs a thread and a connection for as long as it is
+            # open, so refuse clearly instead of exhausting the host.
+            self.close_connection = True
+            return self.error(HTTPStatus.SERVICE_UNAVAILABLE,
+                              "Too many open connections. Close a tab and try again")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -651,6 +658,9 @@ class App(BaseHTTPRequestHandler):
         if became_online:
             BROKER.publish({"type": "presence.online", "user_id": user["id"]})
         last_keepalive = time.time()
+        # One connection for the life of the stream: authorization is still
+        # re-checked per event, but without reopening the database each time.
+        db = connect()
         try:
             while True:
                 try:
@@ -669,7 +679,7 @@ class App(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     continue
                 self.report_missed_events(subscription)
-                if not self.event_visible_to(event, user):
+                if not self.event_visible_to(db, event, user):
                     continue
                 self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
                 self.wfile.flush()
@@ -677,6 +687,7 @@ class App(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
+            db.close()
             _, went_offline = BROKER.unsubscribe(subscription)
             if went_offline:
                 BROKER.publish({"type": "presence.offline", "user_id": user["id"]})
@@ -698,15 +709,14 @@ class App(BaseHTTPRequestHandler):
         except OSError:
             return True
 
-    def event_visible_to(self, event, user):
+    def event_visible_to(self, db, event, user):
         """Re-check authorization per event, since membership can change mid-stream."""
         subject = event["type"].split(".")[0]
-        with connect() as db:
-            if subject == "presence":
-                return shares_community(db, event["user_id"], user["id"])
-            if subject in {"member", "channel"}:
-                return is_member(db, event["community_id"], user["id"])
-            return bool(self.member_channel(db, event["channel_id"], user["id"]))
+        if subject == "presence":
+            return shares_community(db, event["user_id"], user["id"])
+        if subject in {"member", "channel"}:
+            return is_member(db, event["community_id"], user["id"])
+        return bool(self.member_channel(db, event["channel_id"], user["id"]))
 
     def static_file(self, path):
         relative = "index.html" if path == "/" else path.lstrip("/")

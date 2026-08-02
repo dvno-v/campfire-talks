@@ -66,3 +66,12 @@ actor identity, making authorization testable without opening a socket.
 Before supporting multiple Campfire processes, the in-memory event broker and
 rate limiter must be replaced with shared infrastructure. That complexity is
 not justified for the current single-host target.
+
+## The concurrency ceiling
+
+A live stream holds a thread and a database connection until it closes, so
+concurrent users are bounded by threads rather than by anything Campfire
+chooses. The limits in `config.py` make that boundary explicit and refuse work
+past it instead of degrading, but they do not raise it. Lifting the ceiling
+means an event loop and a WebSocket gateway, which is Milestone 3 work and a
+rewrite of this module, not a tuning exercise.
