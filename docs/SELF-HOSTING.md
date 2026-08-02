@@ -28,8 +28,32 @@ CAMPFIRE_DB=/srv/campfire/campfire.db \
 CAMPFIRE_UPLOAD_DIR=/srv/campfire/uploads \
 CAMPFIRE_ORIGIN=https://chat.example.net \
 CAMPFIRE_SECURE_COOKIES=1 \
+CAMPFIRE_TRUSTED_PROXIES=127.0.0.1 \
 python3 server.py
 ```
+
+### Why `CAMPFIRE_TRUSTED_PROXIES` matters
+
+Behind a proxy, every request reaches Campfire from the proxy's address. Without
+this setting the sign-in rate limiter treats all of your users as one client, so
+one attacker's failed attempts lock out everybody — and the limiter would still
+be doing its job as written, silently, which is why it is easy to miss.
+
+Set it to the address or CIDR range your proxy connects from (comma-separated
+for several). Campfire then reads the client address from `X-Forwarded-For`,
+walking it from the right and discarding hops that are themselves trusted
+proxies. A client can prepend anything it likes to that header, so your proxy
+must **append** rather than replace:
+
+```nginx
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header Host $host;
+proxy_buffering off;   # required for /api/events
+```
+
+Leave the variable unset when Campfire is reached directly. Trusting a
+forwarding header from an untrusted peer would let any client claim any address
+and evade the limiter entirely, so the default is to ignore it.
 
 The proxy must preserve long-running Server-Sent Event responses on
 `/api/events`, enforce HTTPS, set sensible request-size/time limits, and avoid

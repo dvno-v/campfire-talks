@@ -1,5 +1,7 @@
 """SQLite connection, schema, and small serialization helpers."""
 
+import contextlib
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -8,11 +10,32 @@ from .config import DB_PATH
 
 
 def connect():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    """Open the database, keeping it readable only by the service account.
+
+    Messages, password hashes and session digests all live in this one file, so
+    the default umask is not good enough: another local account must not be able
+    to read it just because the directory was created loosely.
+    """
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fresh = not DB_PATH.exists()
     database = sqlite3.connect(DB_PATH, timeout=10)
+    if fresh:
+        restrict_permissions()
     database.row_factory = sqlite3.Row
     database.execute("PRAGMA foreign_keys = ON")
+    # Readers and the writer would otherwise lock each other out, which matters
+    # because every live stream holds a connection.
+    database.execute("PRAGMA journal_mode = WAL")
     return database
+
+
+def restrict_permissions():
+    """Narrow the data directory and database files to the owner alone."""
+    with contextlib.suppress(OSError):
+        os.chmod(DB_PATH.parent, 0o700)
+    for path in (DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal"), DB_PATH.with_name(DB_PATH.name + "-shm")):
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
 
 
 def initialize_database():
@@ -76,6 +99,8 @@ def initialize_database():
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
+    # WAL's side files appear only once something has been written.
+    restrict_permissions()
 
 
 def enforce_username_case_uniqueness(database):

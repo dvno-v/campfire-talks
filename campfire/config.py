@@ -1,7 +1,18 @@
 """Environment-backed Campfire configuration."""
 
+import ipaddress
 import os
 from pathlib import Path
+
+
+def _networks(raw):
+    """Parse a comma-separated list of trusted proxy addresses or CIDR ranges."""
+    networks = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if entry:
+            networks.append(ipaddress.ip_network(entry, strict=False))
+    return tuple(networks)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
@@ -13,3 +24,8 @@ PUBLIC_ORIGIN = os.environ.get("CAMPFIRE_ORIGIN", "").rstrip("/")
 ACCESS_LOGS = os.environ.get("CAMPFIRE_ACCESS_LOG", "0") == "1"
 HOST = os.environ.get("CAMPFIRE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CAMPFIRE_PORT", "8000"))
+# Empty by default: forwarded client addresses are trusted only where an
+# operator has named the proxy that sets them.
+TRUSTED_PROXIES = _networks(os.environ.get("CAMPFIRE_TRUSTED_PROXIES", ""))
+MAX_EVENT_STREAMS = max(1, int(os.environ.get("CAMPFIRE_MAX_EVENT_STREAMS", "200")))
+MAX_EVENT_STREAMS_PER_USER = max(1, int(os.environ.get("CAMPFIRE_MAX_EVENT_STREAMS_PER_USER", "8")))

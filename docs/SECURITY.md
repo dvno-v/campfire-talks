@@ -22,7 +22,10 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Active invite metadata and revocation are owner-only. Revocation deletes the
   stored digest, invalidating previously copied codes without retaining them.
 - Authentication attempts are limited in memory to eight per client and
-  operation scope per five-minute window. Addresses are not persisted.
+  operation scope per five-minute window. Addresses are not persisted. Behind a
+  reverse proxy set `CAMPFIRE_TRUSTED_PROXIES`, or every user shares one bucket
+  and a single attacker can lock out the instance; forwarding headers are
+  ignored unless the peer is a proxy the operator named.
 - Sessions use 256-bit random tokens, 30-day expiry, `HttpOnly`, and
   `SameSite=Strict`. Set `CAMPFIRE_SECURE_COOKIES=1` in HTTPS deployments.
   Only a SHA-256 digest of each token is stored, and only the original token is

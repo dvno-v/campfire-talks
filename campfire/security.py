@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import ipaddress
 import re
 import secrets
 import threading
@@ -53,6 +54,46 @@ class RateLimiter:
 
 AUTH_LIMITER = RateLimiter()
 UPLOAD_LIMITER = RateLimiter(attempts=20, window=60)
+
+
+def parse_address(raw):
+    """Return an IP address from a header hop, or None when it is not one."""
+    raw = (raw or "").strip().strip("[]")
+    for candidate in (raw, raw.rsplit(":", 1)[0]):
+        try:
+            return ipaddress.ip_address(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def is_trusted_proxy(raw, trusted_proxies):
+    address = parse_address(raw)
+    return address is not None and any(address in network for network in trusted_proxies)
+
+
+def client_address(peer, forwarded_for, trusted_proxies):
+    """Resolve the address to rate-limit by.
+
+    Behind a reverse proxy every request arrives from the proxy, so limiting by
+    peer address would put every user in one bucket and let one attacker lock
+    out the instance. `X-Forwarded-For` fixes that but is attacker-controlled,
+    so it is consulted only when the peer is a proxy the operator named.
+
+    The header is walked from the right, discarding hops that are themselves
+    trusted proxies: a client can prepend anything it likes, but it cannot
+    forge the entry our own proxy appends.
+    """
+    if not peer:
+        return "unknown"
+    if not is_trusted_proxy(peer, trusted_proxies):
+        return peer
+    for hop in reversed((forwarded_for or "").split(",")):
+        if parse_address(hop) is None:
+            continue
+        if not is_trusted_proxy(hop, trusted_proxies):
+            return hop.strip()
+    return peer
 
 
 def password_hash(password, salt=None):

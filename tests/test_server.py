@@ -1,8 +1,10 @@
 import os
 import sqlite3
+import stat
 import tempfile
 import time
 import unittest
+from ipaddress import ip_network
 from pathlib import Path
 
 temporary = tempfile.TemporaryDirectory()
@@ -227,6 +229,38 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual({member["username"]: member["online"] for member in members},
                          {"presence_owner": True, "presence_absent": False})
         self.assertTrue(all(member["online"] is False for member in without_presence))
+
+    def test_database_files_are_private_and_journalled(self):
+        with database.connect() as db:
+            self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+        self.assertEqual(stat.S_IMODE(database.DB_PATH.stat().st_mode), 0o600,
+                         "the database holds password hashes and messages")
+
+    def test_forwarded_addresses_are_ignored_without_a_trusted_proxy(self):
+        """An unconfigured deployment must never believe a client-supplied header."""
+        self.assertEqual(security.client_address("203.0.113.9", "1.2.3.4", ()), "203.0.113.9")
+        self.assertEqual(security.client_address("203.0.113.9", "1.2.3.4", (ip_network("10.0.0.0/8"),)),
+                         "203.0.113.9")
+
+    def test_forwarded_addresses_are_read_only_from_a_trusted_proxy(self):
+        trusted = (ip_network("10.0.0.0/8"), ip_network("127.0.0.1/32"))
+        self.assertEqual(security.client_address("127.0.0.1", "198.51.100.7", trusted), "198.51.100.7")
+        # A client may prepend anything; only the entry our own proxy appended counts.
+        self.assertEqual(security.client_address("127.0.0.1", "evil, 198.51.100.7", trusted), "198.51.100.7")
+        self.assertEqual(security.client_address("127.0.0.1", "198.51.100.7, 10.0.0.5", trusted), "198.51.100.7")
+        self.assertEqual(security.client_address("127.0.0.1", "not-an-address", trusted), "127.0.0.1")
+        self.assertEqual(security.client_address("127.0.0.1", None, trusted), "127.0.0.1")
+        self.assertEqual(security.client_address("", "198.51.100.7", trusted), "unknown")
+
+    def test_one_attacker_cannot_share_a_bucket_with_everyone_behind_a_proxy(self):
+        trusted = (ip_network("127.0.0.1/32"),)
+        limiter = security.RateLimiter(attempts=2, window=60)
+        attacker = security.client_address("127.0.0.1", "198.51.100.7", trusted)
+        bystander = security.client_address("127.0.0.1", "198.51.100.8", trusted)
+        self.assertTrue(limiter.allow(attacker, timestamp=100))
+        self.assertTrue(limiter.allow(attacker, timestamp=101))
+        self.assertFalse(limiter.allow(attacker, timestamp=102))
+        self.assertTrue(limiter.allow(bystander, timestamp=103), "a bystander must not be locked out")
 
     def test_rate_limiter_window(self):
         limiter = security.RateLimiter(attempts=2, window=10)

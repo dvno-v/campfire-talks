@@ -20,12 +20,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import ACCESS_LOGS, HOST, MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN
+from .config import ACCESS_LOGS, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
+from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, TRUSTED_PROXIES
 from .config import SECURE_COOKIES, STATIC_DIR, UPLOAD_DIR
 from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
-from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
+from .security import client_address, invite_hash, password_hash, password_matches
+from .security import session_hash, valid_invite
 from .services.communities import is_member, list_active_invites, list_community_members, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
@@ -133,9 +135,12 @@ class App(BaseHTTPRequestHandler):
         expected = PUBLIC_ORIGIN or f"{'https' if SECURE_COOKIES else 'http'}://{self.headers.get('Host', '')}"
         return hmac.compare_digest(origin.rstrip("/"), expected)
 
+    def client_ip(self):
+        peer = self.client_address[0] if self.client_address else ""
+        return client_address(peer, self.headers.get("X-Forwarded-For"), TRUSTED_PROXIES)
+
     def auth_limit_key(self, scope):
-        client = self.client_address[0] if self.client_address else "unknown"
-        return f"{client}:{scope.casefold()}"
+        return f"{self.client_ip()}:{scope.casefold()}"
 
     def rate_limit_auth(self, scope):
         if AUTH_LIMITER.allow(self.auth_limit_key(scope)):
@@ -577,6 +582,7 @@ class App(BaseHTTPRequestHandler):
         if declared_type not in {mime_type, "application/octet-stream"}:
             return self.error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Declared file type does not match the image")
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(UPLOAD_DIR, 0o700)  # mkdir's mode is subject to the umask; this is not
         storage_name = f"{secrets.token_hex(24)}{storage_extension}"
         destination = UPLOAD_DIR / storage_name
         descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
