@@ -55,4 +55,5 @@ assets.
 Do not expose the development HTTP server directly to the internet. Read the
 [security model](docs/SECURITY.md), [privacy behavior](docs/PRIVACY.md), and
 [self-hosting guide](docs/SELF-HOSTING.md) before inviting anyone. The current
-HTTP contract is recorded in the [API guide](docs/API.md).
+HTTP contract is recorded in the [API guide](docs/API.md), and module ownership
+is explained in the [architecture guide](docs/ARCHITECTURE.md).
