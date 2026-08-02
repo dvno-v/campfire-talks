@@ -45,7 +45,17 @@ Returns `{"user": null}` when signed out or the current public user object.
 
 ### `GET /api/bootstrap`
 
-Returns the signed-in user and every community/channel they may access.
+Returns the signed-in user and every community/channel they may access. Each
+channel also carries the caller's own reading state:
+
+| Field | Meaning |
+| --- | --- |
+| `unread` | messages newer than the read marker, excluding the caller's own |
+| `last_read_message_id` | highest message id the caller has marked read, or `0` |
+| `notify` | `all`, `none`, or `null` when the account default applies |
+
+Alongside the communities, `notifications.default_mode` gives the account-wide
+default (`all` unless it has been changed).
 
 ## Communities and channels
 
@@ -202,6 +212,59 @@ stream is open:
 The server emits a keepalive every 20 seconds and separately polls for a closed
 peer every two seconds, so a departure is announced in about two seconds rather
 than waiting for a failed keepalive write.
+
+## Unread markers and notification preferences
+
+A *read marker* is the highest message id an account has seen in a channel.
+Only that id is stored — never a time of reading — and unread totals ignore the
+caller's own messages.
+
+A *notification mode* decides whether new messages are announced. `all`
+announces, `none` mutes. One mode applies to the whole account; a per-channel
+mode overrides it for a single channel. Muting affects only what is announced:
+a muted channel still counts its unread messages, so a client can show that it
+moved without interrupting anyone.
+
+### `GET /api/unread`
+
+Returns every readable channel's `channel_id`, `unread`, `last_read_message_id`
+and `notify`, plus the account's `default_mode`. Clients re-read this after a
+reconnect or a `stream.reset`, for the same reason they re-read the channel:
+anything published during a gap never arrived, and a badge that is wrong
+without saying so is worse than one that reloads.
+
+### `POST /api/channels/{channel_id}/read`
+
+```json
+{"message_id": 42}
+```
+
+Advances the caller's read marker and returns the channel's updated state. The
+marker only ever moves forward, so a second tab or a stale client cannot make
+read messages unread again, and it is clamped to the newest message that
+actually exists, so a client cannot claim to have read into the future and
+silence messages it has never seen. Non-members receive `403`.
+
+Repeated calls converge on the same marker, so clients may send one whenever a
+channel is opened or the tab regains focus.
+
+### `PATCH /api/channels/{channel_id}/notifications`
+
+```json
+{"mode": "all"}
+```
+
+`all` and `none` set a per-channel override; `default` removes it so the
+account default applies again. Any other value is `400`; a channel the caller
+cannot reach is `403`. The response is the channel's updated state.
+
+### `PATCH /api/preferences/notifications`
+
+```json
+{"default_mode": "none"}
+```
+
+Sets the account-wide default for channels with no override of their own.
 
 ## Browser request protection
 

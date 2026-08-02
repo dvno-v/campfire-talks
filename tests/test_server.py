@@ -15,6 +15,8 @@ from campfire import database, realtime, security, uploads
 from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
 from campfire.services.communities import shares_community
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
+from campfire.services.notifications import set_account_mode, set_channel_mode
 
 
 def png_chunk(kind, payload):
@@ -65,7 +67,9 @@ class CampfireTests(unittest.TestCase):
     def test_schema_and_relations(self):
         with database.connect() as db:
             names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages", "invitations", "attachments"} <= names)
+        self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages",
+                         "invitations", "attachments", "channel_reads", "notification_preferences",
+                         "channel_notifications"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         self.assertIn("attachment_id", message_columns)
@@ -453,6 +457,111 @@ class CampfireTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as failure:
             database.enforce_username_case_uniqueness(memory)
         self.assertIn("Sam", str(failure.exception))
+
+    def unread_fixture(self, db, label, messages=3):
+        """An owner, a member, an outsider, one channel, and posts written by the owner."""
+        actors = {}
+        for role in ("owner", "member", "outsider"):
+            actors[role] = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                      (f"{label}_{role}", "unused", database.utc_now())).lastrowid
+        community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                  (label, actors["owner"], database.utc_now())).lastrowid
+        for role in ("owner", "member"):
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, actors[role]))
+        channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                                (community_id, "general", database.utc_now())).lastrowid
+        message_ids = [
+            db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                       (channel_id, actors["owner"], f"message {index}", database.utc_now())).lastrowid
+            for index in range(messages)]
+        return actors, community_id, channel_id, message_ids
+
+    def test_unread_counts_ignore_your_own_messages_and_stop_at_the_marker(self):
+        with database.connect() as db:
+            actors, _, channel_id, message_ids = self.unread_fixture(db, "unread_counts")
+            reader = channel_states(db, actors["member"])[channel_id]
+            writer = channel_states(db, actors["owner"])[channel_id]
+            self.assertEqual(reader["unread"], 3)
+            self.assertEqual(reader["last_read_message_id"], 0)
+            self.assertEqual(writer["unread"], 0, "sending a message is not a way of missing it")
+
+            mark_read(db, channel_id, actors["member"], message_ids[1])
+            self.assertEqual(channel_states(db, actors["member"])[channel_id]["unread"], 1)
+
+    def test_a_read_marker_moves_forward_only_and_never_past_the_channel(self):
+        with database.connect() as db:
+            actors, _, channel_id, message_ids = self.unread_fixture(db, "unread_marker")
+            mark_read(db, channel_id, actors["member"], message_ids[2])
+            rewound = mark_read(db, channel_id, actors["member"], message_ids[0])
+            self.assertEqual(rewound["last_read_message_id"], message_ids[2],
+                             "a stale tab must not make read messages unread again")
+
+            ahead = mark_read(db, channel_id, actors["member"], message_ids[2] + 10_000)
+            self.assertEqual(ahead["last_read_message_id"], message_ids[2],
+                             "a client must not silence messages it has never seen")
+
+    def test_outsiders_cannot_read_or_change_channel_state(self):
+        with database.connect() as db:
+            actors, _, channel_id, message_ids = self.unread_fixture(db, "unread_outsider")
+            self.assertIsNone(mark_read(db, channel_id, actors["outsider"], message_ids[0]))
+            self.assertFalse(set_channel_mode(db, channel_id, actors["outsider"], "none"))
+            self.assertNotIn(channel_id, channel_states(db, actors["outsider"]))
+
+    def test_a_new_member_does_not_inherit_the_backlog(self):
+        with database.connect() as db:
+            actors, community_id, channel_id, message_ids = self.unread_fixture(db, "unread_arrival")
+            arrival = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                 ("unread_arrival_joiner", "unused", database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, arrival))
+            mark_community_read(db, community_id, arrival)
+            settled = channel_states(db, arrival)[channel_id]
+            self.assertEqual(settled["unread"], 0)
+            self.assertEqual(settled["last_read_message_id"], message_ids[-1])
+
+            db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                       (channel_id, actors["owner"], "after you arrived", database.utc_now()))
+            self.assertEqual(channel_states(db, arrival)[channel_id]["unread"], 1,
+                             "conversation after the arrival is theirs to read")
+            mark_community_read(db, community_id, arrival)
+            self.assertEqual(channel_states(db, arrival)[channel_id]["unread"], 1,
+                             "settling a backlog once must not keep swallowing new messages")
+
+    def test_notification_modes_layer_a_channel_choice_over_the_account_default(self):
+        with database.connect() as db:
+            actors, _, channel_id, _ = self.unread_fixture(db, "notify_modes")
+            member = actors["member"]
+            self.assertEqual(account_mode(db, member), "all")
+            self.assertIsNone(channel_states(db, member)[channel_id]["notify"])
+
+            set_account_mode(db, member, "none")
+            self.assertEqual(account_mode(db, member), "none")
+
+            self.assertTrue(set_channel_mode(db, channel_id, member, "all"))
+            self.assertEqual(channel_states(db, member)[channel_id]["notify"], "all")
+
+            self.assertTrue(set_channel_mode(db, channel_id, member, None))
+            self.assertIsNone(channel_states(db, member)[channel_id]["notify"],
+                              "clearing an override must fall back to the account default")
+
+    def test_muting_a_channel_still_counts_its_unread_messages(self):
+        """Muting is about not being interrupted, not about pretending nothing happened."""
+        with database.connect() as db:
+            actors, _, channel_id, _ = self.unread_fixture(db, "notify_muted")
+            set_channel_mode(db, channel_id, actors["member"], "none")
+            muted = channel_states(db, actors["member"])[channel_id]
+        self.assertEqual(muted["notify"], "none")
+        self.assertEqual(muted["unread"], 3)
+
+    def test_read_markers_and_mutes_are_removed_with_their_channel(self):
+        with database.connect() as db:
+            actors, _, channel_id, message_ids = self.unread_fixture(db, "notify_cascade")
+            mark_read(db, channel_id, actors["member"], message_ids[0])
+            set_channel_mode(db, channel_id, actors["member"], "none")
+            db.execute("DELETE FROM channels WHERE id=?", (channel_id,))
+            self.assertIsNone(db.execute("SELECT 1 FROM channel_reads WHERE channel_id=?",
+                                         (channel_id,)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM channel_notifications WHERE channel_id=?",
+                                         (channel_id,)).fetchone())
 
     def test_username_rules(self):
         self.assertTrue(security.USERNAME_RE.fullmatch("friendly_user"))

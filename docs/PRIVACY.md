@@ -13,6 +13,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Channel messages | Conversation history | Indefinite, until deleted by the author or community owner |
 | Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or community owner |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
+| Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
+| Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
 
 Raw passwords and raw invite codes are never stored. Campfire does not persist
 IP addresses. Authentication rate-limit state exists only in memory for five
@@ -28,6 +30,25 @@ is nothing to disclose about when you were here before now — restarting the
 server erases presence entirely. Whether you are currently connected is visible
 to people who already share a community with you, and to nobody else. There is
 no way to appear offline yet; if that matters to you, close the tab.
+
+An unread marker stores one number per account and channel: the highest message
+id that account has seen. No time of reading is recorded, so the database
+cannot answer when you were last in a channel, how often you open one, or how
+long you spent there — only where to draw the line under what you have already
+seen. Read markers are private to their account; no one, including a community
+owner, can see whether you have read a message. Nothing in Campfire reports
+delivery or reading back to a sender.
+
+Notification modes are equally private and equally small: `all` or `none`, once
+for the account and optionally once per channel. Muting a channel changes only
+what your own browser announces; the server sends the same events either way,
+because filtering them centrally would mean the server tracking what each
+person is willing to be told. Desktop notifications name the channel and the
+author, never the message, since they can appear on a lock screen or a shared
+desktop. The browser is asked for notification permission only when you press
+the button that asks for it, never on load and never as a side effect of
+signing in. Until you do, Campfire says so in the notification settings rather
+than leaving you to wonder why nothing appears.
 
 Only a community owner can list its active invite metadata. Campfire cannot
 display a previously created raw code because only its digest is retained;

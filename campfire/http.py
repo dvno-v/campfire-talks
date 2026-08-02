@@ -31,6 +31,8 @@ from .security import session_hash, valid_invite
 from .services.communities import is_member, list_active_invites, list_community_members, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
+from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
 from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
@@ -155,6 +157,8 @@ class App(BaseHTTPRequestHandler):
             return self.send_json({"user": user})
         if path == "/api/bootstrap":
             return self.bootstrap()
+        if path == "/api/unread":
+            return self.unread_state()
         if path == "/api/events":
             return self.events()
         if path.startswith("/api/communities/") and path.endswith("/members"):
@@ -190,6 +194,8 @@ class App(BaseHTTPRequestHandler):
                 return self.create_message(path)
             if path.startswith("/api/channels/") and path.endswith("/uploads"):
                 return self.upload_attachment(path)
+            if path.startswith("/api/channels/") and path.endswith("/read"):
+                return self.mark_channel_read(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -214,8 +220,12 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.FORBIDDEN, "Cross-origin request blocked")
         path = urlparse(self.path).path
         try:
+            if path == "/api/preferences/notifications":
+                return self.set_notification_default()
             if path.startswith("/api/messages/"):
                 return self.edit_message(path)
+            if path.startswith("/api/channels/") and path.endswith("/notifications"):
+                return self.set_channel_notifications(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -246,6 +256,7 @@ class App(BaseHTTPRequestHandler):
                     if updated.rowcount != 1:
                         raise sqlite3.IntegrityError("invite exhausted")
                     db.execute("INSERT INTO memberships VALUES(?,?)", (invitation["community_id"], user_id))
+                    mark_community_read(db, invitation["community_id"], user_id)
                 else:
                     community = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                            (f"{username}'s place", user_id, utc_now())).lastrowid
@@ -310,12 +321,101 @@ class App(BaseHTTPRequestHandler):
               JOIN channels ch ON ch.community_id=c.id WHERE m.user_id=?
               ORDER BY c.id,ch.id
             """, (user["id"],)).fetchall()
+            states = channel_states(db, user["id"])
+            default_mode = account_mode(db, user["id"])
         communities = {}
         for row in rows:
             community = communities.setdefault(row["community_id"], {
                 "id": row["community_id"], "name": row["community_name"], "channels": []})
-            community["channels"].append({"id": row["channel_id"], "name": row["channel_name"]})
-        self.send_json({"user": user, "communities": list(communities.values())})
+            community["channels"].append({"id": row["channel_id"], "name": row["channel_name"]}
+                                         | self.channel_state_payload(states.get(row["channel_id"])))
+        self.send_json({"user": user, "communities": list(communities.values()),
+                        "notifications": {"default_mode": default_mode}})
+
+    def channel_state_payload(self, state):
+        """The unread/notification fields a client needs to render one channel.
+
+        A channel with nothing recorded reads the same as one nobody has opened
+        yet, which is also what a client sees for a channel created moments ago.
+        """
+        state = state or {}
+        return {"unread": state.get("unread", 0),
+                "last_read_message_id": state.get("last_read_message_id", 0),
+                "notify": state.get("notify")}
+
+    def unread_state(self):
+        """Every channel's unread total and notification mode in one read.
+
+        Clients re-read this after a reconnect or a `stream.reset`, because
+        anything published during a gap never reached them and the badges would
+        otherwise stay wrong without saying so.
+        """
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as db:
+            states = channel_states(db, user["id"])
+            default_mode = account_mode(db, user["id"])
+        channels = [{"channel_id": channel_id} | self.channel_state_payload(state)
+                    for channel_id, state in states.items()]
+        self.send_json({"channels": channels, "default_mode": default_mode})
+
+    def channel_id_from(self, path):
+        try:
+            return int(path.split("/")[3])
+        except (ValueError, IndexError):
+            # The body is never read on this path, so the connection cannot be
+            # resynchronized for a following request.
+            self.close_connection = True
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid channel")
+
+    def mark_channel_read(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        channel_id = self.channel_id_from(path)
+        if channel_id is None:
+            return
+        try:
+            message_id = int(self.json_body().get("message_id", 0))
+        except (TypeError, ValueError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid message")
+        with connect() as db:
+            state = mark_read(db, channel_id, user["id"], message_id)
+        if state is None:
+            return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
+        self.send_json({"channel_id": channel_id} | self.channel_state_payload(state))
+
+    def set_notification_default(self):
+        user = self.require_user()
+        if not user:
+            return
+        mode = str(self.json_body().get("default_mode", ""))
+        if mode not in NOTIFICATION_MODES:
+            return self.error(HTTPStatus.BAD_REQUEST, "Notification mode must be 'all' or 'none'")
+        with connect() as db:
+            set_account_mode(db, user["id"], mode)
+        self.send_json({"default_mode": mode})
+
+    def set_channel_notifications(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        channel_id = self.channel_id_from(path)
+        if channel_id is None:
+            return
+        # "default" clears the override, which an absent field could not express
+        # unambiguously.
+        mode = str(self.json_body().get("mode", ""))
+        if mode not in NOTIFICATION_MODES | {"default"}:
+            return self.error(HTTPStatus.BAD_REQUEST,
+                              "Notification mode must be 'all', 'none', or 'default'")
+        with connect() as db:
+            allowed = set_channel_mode(db, channel_id, user["id"], None if mode == "default" else mode)
+            state = channel_states(db, user["id"], channel_id).get(channel_id) if allowed else None
+        if not allowed:
+            return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
+        self.send_json({"channel_id": channel_id} | self.channel_state_payload(state))
 
     def create_community(self):
         user = self.require_user()
@@ -443,6 +543,7 @@ class App(BaseHTTPRequestHandler):
             if updated.rowcount != 1:
                 return self.error(HTTPStatus.CONFLICT, "Invite is fully used")
             db.execute("INSERT INTO memberships VALUES(?,?)", (invitation["community_id"], user["id"]))
+            mark_community_read(db, invitation["community_id"], user["id"])
         self.announce_member(invitation["community_id"], user["id"], user["username"])
         self.send_json({"id": invitation["community_id"], "name": invitation["community_name"]},
                        HTTPStatus.CREATED)

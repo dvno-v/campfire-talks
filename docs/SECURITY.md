@@ -57,6 +57,11 @@ encrypted. A compromised host, browser, or administrator can read them.
   `404` rather than a denial that would confirm the message exists.
 - Community member lists verify the requesting actor's current membership and
   return `404` to outsiders rather than revealing whether a community exists.
+- Read markers and notification modes are per-account and readable only by
+  their owner; setting either verifies channel membership first. A marker only
+  moves forward and is clamped to the newest message that exists, so a hostile
+  client cannot rewind another session's position or silence messages by
+  claiming to have read into the future.
 - Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
   validation, random non-user-controlled storage names, and private authorized
   retrieval. SVG and arbitrary documents are rejected.

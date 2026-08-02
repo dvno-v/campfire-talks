@@ -16,7 +16,7 @@ operator clarity, and recoverability take priority over growth features.
 
 ## Milestone 1 — Private text community
 
-Status: in progress
+Status: complete
 
 - [x] Accounts, hardened sessions, and rate-limited login
 - [x] Invite-only onboarding with expiring hashed codes
@@ -27,13 +27,15 @@ Status: in progress
 - [x] Online presence
 - [x] Message edit/delete with clear ownership rules
 - [x] Owner invite list and immediate invite revocation
-- [ ] Unread markers and basic notification preferences
+- [x] Unread markers and basic notification preferences
 
 Exit criteria: two browser profiles can safely join, chat, and share images;
 users cannot read another community’s content by changing identifiers; restart
 does not lose data; all persistent data is documented.
 
 ## Milestone 2 — Community control and data lifecycle
+
+Status: next
 
 - Roles: owner, administrator, moderator, member
 - Kick/ban, channel permissions, slow mode, and upload controls

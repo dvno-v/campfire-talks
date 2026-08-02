@@ -1,0 +1,108 @@
+/* The badge is pushed to the far edge, so the name must not stretch the row. */
+.channel {
+  align-items: center;
+}
+
+.channel.unread {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* Muted channels still show movement, just without asking to be cleared. */
+.channel.muted {
+  opacity: 0.55;
+}
+
+.channel-badge {
+  background: var(--accent);
+  border-radius: 9px;
+  color: #21120f;
+  font-size: 11px;
+  font-weight: 800;
+  margin-left: auto;
+  min-width: 20px;
+  padding: 1px 6px;
+  text-align: center;
+}
+
+.community-icon {
+  position: relative;
+}
+
+.community-icon.has-unread::after {
+  background: var(--accent2);
+  border: 2px solid #121316;
+  border-radius: 50%;
+  content: '';
+  height: 12px;
+  position: absolute;
+  right: -2px;
+  top: -2px;
+  width: 12px;
+}
+
+.notify-button {
+  font-size: 15px;
+  position: relative;
+}
+
+/* Notifications are on by default but the browser may never have been asked;
+   without this the failure is completely silent. */
+.notify-button.needs-permission::after {
+  background: var(--accent);
+  border-radius: 50%;
+  content: '';
+  height: 7px;
+  position: absolute;
+  right: 0;
+  top: 2px;
+  width: 7px;
+}
+
+#enable-notifications {
+  margin-top: 14px;
+}
+
+.unread-divider {
+  align-items: center;
+  color: var(--accent);
+  display: flex;
+  font-size: 10px;
+  font-weight: 800;
+  gap: 10px;
+  letter-spacing: 0.16em;
+  margin: 18px 0;
+}
+
+.unread-divider::before {
+  background: var(--accent);
+  content: '';
+  flex: 1;
+  height: 1px;
+  opacity: 0.55;
+}
+
+.notify-default {
+  align-items: center;
+  display: flex;
+  font-size: 14px;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 20px;
+}
+
+.notify-permission {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 10px 0 0;
+}
+
+.notify-default select,
+.invite-row select {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  padding: 7px 9px;
+}

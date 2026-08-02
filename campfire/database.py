@@ -88,6 +88,22 @@ def initialize_database():
           byte_size INTEGER NOT NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS channel_reads (
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+          last_read_message_id INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (user_id, channel_id)
+        );
+        CREATE TABLE IF NOT EXISTS notification_preferences (
+          user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+          mode TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS channel_notifications (
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+          mode TEXT NOT NULL,
+          PRIMARY KEY (user_id, channel_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
         CREATE INDEX IF NOT EXISTS idx_invites_token ON invitations(token_hash);
         """)

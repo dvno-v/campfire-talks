@@ -16,6 +16,8 @@ and the browser receives live messages over Server-Sent Events.
 - Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit), stored
   with EXIF and other metadata removed
 - Live message delivery with automatic reconnect
+- Per-channel unread markers, a “new messages” divider, and account-wide or
+  per-channel notification preferences
 - Rate-limited authentication and restrictive browser security headers
 - Responsive three-panel chat UI
 
@@ -43,8 +45,8 @@ python3 -m unittest discover -s tests -v
 
 ## Near-term roadmap
 
-1. Roles, moderation beyond deletion, and unread markers
-2. Direct messages, unread counts, and notifications
+1. Roles and moderation beyond deletion
+2. Direct messages and per-community retention settings
 3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
 4. Voice rooms through a dedicated WebRTC SFU
 

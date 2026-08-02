@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/layout.css">
   <link rel="stylesheet" href="/members.css">
   <link rel="stylesheet" href="/invites.css">
+  <link rel="stylesheet" href="/notifications.css">
 </head>
 <body>
   <main id="auth" class="auth-shell">
@@ -30,7 +31,7 @@
   <main id="app" class="app hidden">
     <aside class="rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
     <aside class="sidebar">
-      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" title="Add channel">+</button></div></header>
+      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="notify-settings" class="notify-button" title="Notification settings">🔔</button><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" title="Add channel">+</button></div></header>
       <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
       <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
     </aside>
@@ -50,6 +51,16 @@
       <p class="muted">Codes are shown only when created. Revoking one invalidates every copy immediately.</p>
       <div id="invite-list" class="invite-list"></div>
       <button id="create-invite" class="primary" type="button">Create 24-hour invite</button>
+    </section>
+  </dialog>
+  <dialog id="notify-dialog" class="invite-dialog">
+    <section>
+      <header><div><p class="eyebrow">NOTIFICATIONS</p><h2>What you get told about</h2></div><button id="close-notify" type="button" aria-label="Close notification settings">×</button></header>
+      <p class="muted">A desktop notification names the channel and who wrote, never what was said, because it can appear on a lock screen. Muted channels still collect unread markers — quietly.</p>
+      <label class="notify-default">Every channel by default<select id="notify-default"><option value="all">Notify me</option><option value="none">Stay quiet</option></select></label>
+      <p id="notify-permission" class="notify-permission"></p>
+      <button id="enable-notifications" class="primary hidden" type="button">Allow desktop notifications</button>
+      <div id="notify-channels" class="invite-list"></div>
     </section>
   </dialog>
   <script src="/app.js"></script>

@@ -372,6 +372,69 @@ class HTTPTests(unittest.TestCase):
         self.assertIn("presence_viewer", online)
         self.assertNotIn("http_owner", online, "an account with no open stream must read as offline")
 
+    def test_unread_state_travels_with_bootstrap_and_clears_when_read(self):
+        reader = self.signed_in_user("unread_reader")
+        writer = self.signed_in_user("unread_writer")
+        message = self.post_message(writer, "something to catch up on")
+
+        _, payload, _ = self.request("GET", "/api/bootstrap", cookie=reader)
+        channels = {channel["id"]: channel
+                    for community in payload["communities"] for channel in community["channels"]}
+        self.assertGreaterEqual(channels[self.channel_id]["unread"], 1)
+        self.assertIsNone(channels[self.channel_id]["notify"])
+        self.assertEqual(payload["notifications"]["default_mode"], "all")
+
+        status, marked, _ = self.request("POST", f"/api/channels/{self.channel_id}/read",
+                                         {"message_id": message["id"]}, cookie=reader)
+        self.assertEqual(status, 200)
+        self.assertEqual(marked["unread"], 0)
+        self.assertEqual(marked["last_read_message_id"], message["id"])
+
+        _, unread, _ = self.request("GET", "/api/unread", cookie=reader)
+        by_channel = {entry["channel_id"]: entry for entry in unread["channels"]}
+        self.assertEqual(by_channel[self.channel_id]["unread"], 0)
+
+    def test_a_non_member_cannot_mark_a_channel_read_or_mute_it(self):
+        outsider = self.signed_in_user("unread_outsider_http", member=False)
+        status, _, _ = self.request("POST", f"/api/channels/{self.channel_id}/read",
+                                    {"message_id": 1}, cookie=outsider)
+        self.assertEqual(status, 403)
+        status, _, _ = self.request("PATCH", f"/api/channels/{self.channel_id}/notifications",
+                                    {"mode": "none"}, cookie=outsider)
+        self.assertEqual(status, 403)
+
+    def test_notification_modes_are_stored_and_unknown_ones_refused(self):
+        user = self.signed_in_user("notify_http_user")
+        status, payload, _ = self.request("PATCH", "/api/preferences/notifications",
+                                          {"default_mode": "none"}, cookie=user)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["default_mode"], "none")
+        status, _, _ = self.request("PATCH", "/api/preferences/notifications",
+                                    {"default_mode": "everything"}, cookie=user)
+        self.assertEqual(status, 400)
+
+        status, payload, _ = self.request("PATCH", f"/api/channels/{self.channel_id}/notifications",
+                                          {"mode": "all"}, cookie=user)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["notify"], "all")
+        status, payload, _ = self.request("PATCH", f"/api/channels/{self.channel_id}/notifications",
+                                          {"mode": "default"}, cookie=user)
+        self.assertEqual(status, 200)
+        self.assertIsNone(payload["notify"], "clearing an override restores the account default")
+        status, _, _ = self.request("PATCH", f"/api/channels/{self.channel_id}/notifications",
+                                    {"mode": "sometimes"}, cookie=user)
+        self.assertEqual(status, 400)
+
+    def test_registering_with_an_invite_settles_the_backlog(self):
+        self.post_message(self.owner_session, "said before you arrived")
+        status, _, session = self.request("POST", "/api/register", {
+            "username": "unread_invited", "password": PASSWORD, "invite": self.invite_token()})
+        self.assertEqual(status, 201)
+        _, payload, _ = self.request("GET", "/api/unread", cookie=session)
+        by_channel = {entry["channel_id"]: entry for entry in payload["channels"]}
+        self.assertEqual(by_channel[self.channel_id]["unread"], 0,
+                         "a new member did not miss the conversation from before they were invited")
+
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)
