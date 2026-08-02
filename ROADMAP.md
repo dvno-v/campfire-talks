@@ -69,12 +69,30 @@ back from the documentation without losing messages or files.
 - Self-hosted LiveKit proof of concept and documented firewall/TURN requirements
 - Voice channels with device selection, mute/deafen, and connection indicators
 - User-initiated screen/window/tab sharing with an always-visible stop control
+  that ends video and audio together
+- Optional capture of shared-application audio, published as a track separate
+  from the microphone, with capture-side processing disabled
 - Media quality controls suitable for home upload bandwidth
 - E2EE for media with an explicit room-key distribution design
 - No recording, transcription, or media telemetry by default
 
+Shared-application audio depends on the browser and operating system, not on
+Campfire. Full desktop audio is available on Chromium-based browsers on
+Windows; other platforms are limited to tab audio or no audio at all, and
+Firefox and Safari cannot capture it. The client advertises what the current
+browser supports rather than failing silently, and a share with no audio track
+remains a valid share.
+
+The upload ceiling is the server's, not the sharer's. A self-hosted SFU on a
+home connection sends one copy of the stream per viewer, so the constraint is
+viewers multiplied by bitrate. Screen share is therefore capped by default at
+1080p30, simulcast is enabled so constrained viewers receive a lower layer, and
+voice channels have a documented participant limit.
+
 Exit criteria: a small group can sustain voice and one screen share through both
-direct UDP and TURN fallback, and the documented encryption claims are verified.
+direct UDP and TURN fallback within a measured upstream budget, a share with
+audio survives the same path on a supported browser, and the documented
+encryption claims are verified.
 
 ## Milestone 5 — Friend-group polish
 
