@@ -8,7 +8,7 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, security, uploads
-from campfire.services.communities import list_community_members
+from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
 
 
 class CampfireTests(unittest.TestCase):
@@ -56,6 +56,39 @@ class CampfireTests(unittest.TestCase):
             stored = db.execute("SELECT token_hash FROM invitations").fetchone()[0]
         self.assertEqual(invite["community_id"], community_id)
         self.assertNotEqual(stored, token)
+
+    def test_owner_can_list_and_immediately_revoke_active_invites(self):
+        with database.connect() as db:
+            owner_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("invite_manager", "unused", database.utc_now())).lastrowid
+            member_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                   ("invite_member", "unused", database.utc_now())).lastrowid
+            community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                      ("Invite Management", owner_id, database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, member_id))
+            active_id = db.execute("""INSERT INTO invitations
+              (community_id,created_by,token_hash,expires_at,max_uses,uses,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (community_id, owner_id, security.invite_hash("active"), 2000, 3, 1, database.utc_now())).lastrowid
+            db.execute("""INSERT INTO invitations
+              (community_id,created_by,token_hash,expires_at,max_uses,uses,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (community_id, owner_id, security.invite_hash("expired"), 999, 3, 0, database.utc_now()))
+            db.execute("""INSERT INTO invitations
+              (community_id,created_by,token_hash,expires_at,max_uses,uses,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (community_id, owner_id, security.invite_hash("exhausted"), 2000, 1, 1, database.utc_now()))
+            visible = list_active_invites(db, community_id, owner_id, timestamp=1000)
+            forbidden = list_active_invites(db, community_id, member_id, timestamp=1000)
+            member_revoked = revoke_invite(db, active_id, member_id)
+            owner_revoked = revoke_invite(db, active_id, owner_id)
+            remaining = db.execute("SELECT 1 FROM invitations WHERE id=?", (active_id,)).fetchone()
+        self.assertEqual([invite["id"] for invite in visible], [active_id])
+        self.assertIsNone(forbidden)
+        self.assertFalse(member_revoked)
+        self.assertTrue(owner_revoked)
+        self.assertIsNone(remaining)
 
     def test_member_list_marks_owner_and_hides_from_outsiders(self):
         with database.connect() as db:

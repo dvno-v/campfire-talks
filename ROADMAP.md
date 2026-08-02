@@ -26,7 +26,7 @@ Status: in progress
 - [x] Member list with owner indicators
 - [ ] Online presence
 - [ ] Message edit/delete with clear ownership rules
-- [ ] Owner invite list and immediate invite revocation
+- [x] Owner invite list and immediate invite revocation
 - [ ] Unread markers and basic notification preferences
 
 Exit criteria: two browser profiles can safely join, chat, and share images;

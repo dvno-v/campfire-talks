@@ -85,6 +85,19 @@ hours. The response includes the raw code exactly once; share it through a
 trusted side channel. Campfire stores only its digest. Avoid putting invite
 codes in URLs, screenshots, or long-lived chat histories.
 
+### `GET /api/communities/{community_id}/invites`
+
+Returns active invite metadata to the community owner: internal invite ID,
+creator, creation and expiry times, use count, and maximum uses. Raw invite
+codes are never returned because Campfire stores only their digests. Expired and
+fully used invitations are omitted. Other members receive `403`.
+
+### `DELETE /api/invites/{invite_id}`
+
+Immediately deletes an invitation when requested by its community owner. Every
+outstanding copy of the code becomes invalid on the next use. Missing invites
+and invites owned by another user both return `404`.
+
 ### `POST /api/invites/join`
 
 ```json

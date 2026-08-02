@@ -1,0 +1,91 @@
+.invite-dialog {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  max-width: 520px;
+  padding: 0;
+  width: calc(100% - 32px);
+}
+
+.invite-dialog::backdrop {
+  backdrop-filter: blur(4px);
+  background: #07080bb8;
+}
+
+.invite-dialog > section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 30px 80px #0009;
+  padding: 24px;
+}
+
+.invite-dialog header {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+}
+
+.invite-dialog h2,
+.invite-dialog .eyebrow {
+  margin: 0;
+}
+
+.invite-dialog h2 {
+  margin-top: 5px;
+}
+
+.invite-dialog header button {
+  background: none;
+  color: var(--muted);
+  font-size: 28px;
+}
+
+.invite-list {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0;
+  max-height: 320px;
+  min-height: 64px;
+  overflow-y: auto;
+}
+
+.invite-row {
+  align-items: center;
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px;
+}
+
+.invite-row strong,
+.invite-row span {
+  display: block;
+}
+
+.invite-row span {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+}
+
+.invite-row button {
+  background: #542c2d;
+  border-radius: 7px;
+  color: #ffb4aa;
+  font-size: 12px;
+  padding: 8px 10px;
+}
+
+.invite-row button:hover {
+  background: #703638;
+}
+
+.invite-list .member-empty {
+  align-self: center;
+  margin: 0;
+  text-align: center;
+}

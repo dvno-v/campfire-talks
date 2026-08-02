@@ -1,4 +1,6 @@
-"""Community membership queries and authorization."""
+"""Community membership and owner-authorized management queries."""
+
+import time
 
 
 def list_community_members(database, community_id, actor_id):
@@ -20,3 +22,35 @@ def list_community_members(database, community_id, actor_id):
       ORDER BY CASE WHEN c.owner_id=u.id THEN 0 ELSE 1 END, u.username COLLATE NOCASE
     """, (community_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_active_invites(database, community_id, actor_id, timestamp=None):
+    """Return active invite metadata to the owner, or None to other actors."""
+    owns = database.execute(
+        "SELECT 1 FROM communities WHERE id=? AND owner_id=?",
+        (community_id, actor_id),
+    ).fetchone()
+    if not owns:
+        return None
+
+    timestamp = int(timestamp or time.time())
+    rows = database.execute("""
+      SELECT i.id,i.expires_at,i.max_uses,i.uses,i.created_at,
+        u.id creator_id,u.username creator_username
+      FROM invitations i
+      JOIN users u ON u.id=i.created_by
+      WHERE i.community_id=? AND i.expires_at>? AND i.uses<i.max_uses
+      ORDER BY i.id DESC
+    """, (community_id, timestamp)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def revoke_invite(database, invite_id, actor_id):
+    """Delete an invite only when the actor owns its community."""
+    cursor = database.execute("""
+      DELETE FROM invitations
+      WHERE id=? AND community_id IN (
+        SELECT id FROM communities WHERE owner_id=?
+      )
+    """, (invite_id, actor_id))
+    return cursor.rowcount == 1

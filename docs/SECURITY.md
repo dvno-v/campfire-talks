@@ -19,6 +19,8 @@ encrypted. A compromised host, browser, or administrator can read them.
   iterations. Existing hashes from the first prototype are upgraded on login.
 - After the initial owner account, registration requires a random, expiring
   invite. Only a SHA-256 digest of each invite is stored.
+- Active invite metadata and revocation are owner-only. Revocation deletes the
+  stored digest, invalidating previously copied codes without retaining them.
 - Authentication attempts are limited in memory to eight per client and
   operation scope per five-minute window. Addresses are not persisted.
 - Sessions use 256-bit random tokens, 30-day expiry, `HttpOnly`, and

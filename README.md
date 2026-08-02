@@ -8,6 +8,7 @@ and the browser receives live messages over Server-Sent Events.
 
 - Account registration, login, and cookie-based sessions
 - Invite-only registration after the first account
+- Owner-only active invite management and immediate revocation
 - Communities and text channels
 - Authorized member lists with owner indicators
 - Persistent messages

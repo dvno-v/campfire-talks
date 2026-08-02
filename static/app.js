@@ -33,6 +33,7 @@ function renderCommunities() {
 }
 
 function selectCommunity(community) {
+  if ($('#invite-dialog').open) $('#invite-dialog').close();
   state.community = community; $('#community-name').textContent = community?.name || 'Campfire'; renderCommunities();
   state.members = []; renderMembers();
   $('#channels').innerHTML = (community?.channels || []).map(c => `<button class="channel" data-id="${c.id}">${escapeHTML(c.name)}</button>`).join('');
@@ -48,6 +49,7 @@ async function loadMembers(communityId) {
 
 function renderMembers() {
   $('#member-count').textContent = state.members.length;
+  $('#invite-friend').classList.toggle('hidden', !isOwner(state.user?.id));
   $('#member-list').innerHTML = state.members.length ? state.members.map(member => `<article class="member-row"><div class="member-avatar">${escapeHTML(initials(member.username))}</div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${member.role==='owner'?'<span class="member-role">OWNER</span>':''}</div></article>`).join('') : '<p class="member-empty">Loading members…</p>';
 }
 
@@ -87,7 +89,11 @@ $('#file-input').onchange = async event => { const file=event.target.files[0]; e
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
 $('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
-$('#invite-friend').onclick = async () => { if(!state.community)return; try { const data=await api('/api/invites',{method:'POST',body:JSON.stringify({community_id:state.community.id,max_uses:10,lifetime_hours:24})}); if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(data.token); alert('Invite code copied. It expires in 24 hours.');}else{prompt('Copy this invite code. It expires in 24 hours.',data.token);} } catch(error){alert(error.message);} };
+$('#invite-friend').onclick = async () => { if(!state.community)return; $('#invite-dialog').showModal(); await loadInvites(); };
+$('#close-invites').onclick = () => $('#invite-dialog').close();
+$('#create-invite').onclick = async () => { if(!state.community)return; const button=$('#create-invite'); button.disabled=true; try { const data=await api('/api/invites',{method:'POST',body:JSON.stringify({community_id:state.community.id,max_uses:10,lifetime_hours:24})}); if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(data.token); alert('Invite code copied. It expires in 24 hours.');}else{prompt('Copy this invite code. It expires in 24 hours.',data.token);} await loadInvites(); } catch(error){alert(error.message);} finally {button.disabled=false;} };
+async function loadInvites() { const communityId=state.community?.id; if(!communityId)return; $('#invite-list').innerHTML='<p class="member-empty">Loading invites…</p>'; try { const data=await api(`/api/communities/${communityId}/invites`); if(state.community?.id!==communityId)return; $('#invite-list').innerHTML=data.invites.length?data.invites.map(invite=>`<article class="invite-row"><div><strong>Invite #${Number(invite.id)}</strong><span>Created by ${escapeHTML(invite.creator_username)} · ${Number(invite.uses)}/${Number(invite.max_uses)} uses</span><span>Expires ${new Date(Number(invite.expires_at)*1000).toLocaleString()}</span></div><button type="button" data-revoke-invite="${Number(invite.id)}">Revoke</button></article>`).join(''):'<p class="member-empty">No active invites.</p>'; document.querySelectorAll('[data-revoke-invite]').forEach(button=>button.onclick=()=>revokeInvite(Number(button.dataset.revokeInvite))); } catch(error){ $('#invite-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
+async function revokeInvite(inviteId) { if(!confirm(`Revoke invite #${inviteId}? Every copy will stop working immediately.`))return; try { await api(`/api/invites/${inviteId}`,{method:'DELETE'}); await loadInvites(); } catch(error){alert(error.message);} }
 $('#add-channel').onclick = async () => { if(!state.community)return; const name=prompt('Channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,community_id:state.community.id})}); state.community.channels.push(channel); selectCommunity(state.community); selectChannel(channel); } catch(error){alert(error.message);} };
 
 api('/api/me').then(data => data.user ? enterApp() : showAuth()).catch(showAuth);

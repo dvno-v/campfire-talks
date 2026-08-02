@@ -24,7 +24,8 @@ from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
-from .services.communities import list_community_members
+from .services.communities import list_active_invites, list_community_members
+from .services.communities import revoke_invite as revoke_community_invite
 from .uploads import detect_image_type, safe_original_name
 
 class App(BaseHTTPRequestHandler):
@@ -125,6 +126,8 @@ class App(BaseHTTPRequestHandler):
             return self.events()
         if path.startswith("/api/communities/") and path.endswith("/members"):
             return self.community_members(path)
+        if path.startswith("/api/communities/") and path.endswith("/invites"):
+            return self.community_invites(path)
         if path.startswith("/api/attachments/"):
             return self.serve_attachment(path)
         if path.startswith("/api/channels/") and path.endswith("/messages"):
@@ -153,6 +156,15 @@ class App(BaseHTTPRequestHandler):
             return self.create_message(path)
         if path.startswith("/api/channels/") and path.endswith("/uploads"):
             return self.upload_attachment(path)
+        return self.error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_DELETE(self):
+        if not self.valid_request_source():
+            self.close_connection = True
+            return self.error(HTTPStatus.FORBIDDEN, "Cross-origin request blocked")
+        path = urlparse(self.path).path
+        if path.startswith("/api/invites/"):
+            return self.revoke_invite(path)
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
 
     def register(self):
@@ -278,6 +290,20 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.NOT_FOUND, "Community not found")
         self.send_json({"members": members})
 
+    def community_invites(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            community_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
+        with connect() as database:
+            invitations = list_active_invites(database, community_id, user["id"])
+        if invitations is None:
+            return self.error(HTTPStatus.FORBIDDEN, "Only the community owner can manage invites")
+        self.send_json({"invites": invitations})
+
     def create_channel(self):
         user = self.require_user()
         if not user:
@@ -324,6 +350,20 @@ class App(BaseHTTPRequestHandler):
               VALUES(?,?,?,?,?,?)""",
               (community_id, user["id"], invite_hash(token), expires_at, max_uses, utc_now()))
         self.send_json({"token": token, "expires_at": expires_at, "max_uses": max_uses}, HTTPStatus.CREATED)
+
+    def revoke_invite(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            invite_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid invite")
+        with connect() as database:
+            revoked = revoke_community_invite(database, invite_id, user["id"])
+        if not revoked:
+            return self.error(HTTPStatus.NOT_FOUND, "Invite not found")
+        self.send_json({"ok": True})
 
     def join_invite(self):
         user = self.require_user()

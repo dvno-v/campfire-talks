@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/attachments.css">
   <link rel="stylesheet" href="/layout.css">
   <link rel="stylesheet" href="/members.css">
+  <link rel="stylesheet" href="/invites.css">
 </head>
 <body>
   <main id="auth" class="auth-shell">
@@ -28,7 +29,7 @@
   <main id="app" class="app hidden">
     <aside class="rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
     <aside class="sidebar">
-      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="invite-friend" title="Create invite">⌁</button><button id="add-channel" title="Add channel">+</button></div></header>
+      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" title="Add channel">+</button></div></header>
       <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
       <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
     </aside>
@@ -42,6 +43,14 @@
       <div id="member-list" class="member-list"></div>
     </aside>
   </main>
+  <dialog id="invite-dialog" class="invite-dialog">
+    <section>
+      <header><div><p class="eyebrow">COMMUNITY ACCESS</p><h2>Active invites</h2></div><button id="close-invites" type="button" aria-label="Close invite manager">×</button></header>
+      <p class="muted">Codes are shown only when created. Revoking one invalidates every copy immediately.</p>
+      <div id="invite-list" class="invite-list"></div>
+      <button id="create-invite" class="primary" type="button">Create 24-hour invite</button>
+    </section>
+  </dialog>
   <script src="/app.js"></script>
 </body>
 </html>

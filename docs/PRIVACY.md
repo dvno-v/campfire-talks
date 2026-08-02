@@ -22,6 +22,10 @@ Members of the same community can see one another's username, internal user ID,
 and whether a person owns that community. The member-list feature adds no new
 persistent data beyond existing accounts and memberships.
 
+Only a community owner can list its active invite metadata. Campfire cannot
+display a previously created raw code because only its digest is retained;
+revocation deletes that digest and its usage metadata immediately.
+
 Images are stored under `data/uploads` by default using random server-generated
 names. The original filename, detected media type, byte size, uploader, and
 channel are stored in SQLite. Image metadata inside the uploaded bytes (for
