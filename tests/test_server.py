@@ -4,6 +4,7 @@ import stat
 import tempfile
 import time
 import unittest
+import zlib
 from ipaddress import ip_network
 from pathlib import Path
 
@@ -14,6 +15,40 @@ from campfire import database, realtime, security, uploads
 from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
 from campfire.services.communities import shares_community
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+
+
+def png_chunk(kind, payload):
+    return (len(payload).to_bytes(4, "big") + kind + payload
+            + zlib.crc32(kind + payload).to_bytes(4, "big"))
+
+
+def png_chunks(content):
+    offset = len(uploads.PNG_SIGNATURE)
+    while offset + 12 <= len(content):
+        length = int.from_bytes(content[offset:offset + 4], "big")
+        yield content[offset + 4:offset + 8], content[offset + 8:offset + 8 + length]
+        offset += 12 + length
+
+
+def png_chunk_types(content):
+    return [kind for kind, _ in png_chunks(content)]
+
+
+def png_chunk_payload(content, wanted):
+    return b"".join(payload for kind, payload in png_chunks(content) if kind == wanted)
+
+
+def jpeg_segment(marker, payload):
+    return bytes([0xFF, marker]) + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def gif_blocks(payload):
+    return bytes([len(payload)]) + payload + b"\x00"
+
+
+def riff_chunk(fourcc, payload):
+    padded = payload + (b"\x00" if len(payload) % 2 else b"")
+    return fourcc + len(payload).to_bytes(4, "little") + padded
 
 
 class CampfireTests(unittest.TestCase):
@@ -41,6 +76,104 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual(uploads.detect_image_type(b"\xff\xd8\xffrest")[0], "image/jpeg")
         self.assertEqual(uploads.detect_image_type(b"RIFFxxxxWEBPrest")[0], "image/webp")
         self.assertIsNone(uploads.detect_image_type(b"<svg><script>alert(1)</script></svg>"))
+
+    def test_png_metadata_is_removed_and_pixels_survive(self):
+        pixels = zlib.compress(b"\x00\xff\x00\x00")
+        original = (uploads.PNG_SIGNATURE
+                    + png_chunk(b"IHDR", (1).to_bytes(4, "big") + (1).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00")
+                    + png_chunk(b"tEXt", b"Comment\x00taken at home")
+                    + png_chunk(b"eXIf", b"GPS 51.5074 N 0.1278 W")
+                    + png_chunk(b"tIME", b"\x07\xe6\x08\x02\x10\x00\x00")
+                    + png_chunk(b"IDAT", pixels)
+                    + png_chunk(b"IEND", b""))
+        stripped = uploads.strip_png(original)
+        self.assertIsNotNone(stripped)
+        self.assertNotIn(b"GPS", stripped)
+        self.assertNotIn(b"taken at home", stripped)
+        self.assertEqual(png_chunk_types(stripped), [b"IHDR", b"IDAT", b"IEND"])
+        self.assertEqual(zlib.decompress(png_chunk_payload(stripped, b"IDAT")), b"\x00\xff\x00\x00")
+        self.assertEqual(uploads.detect_image_type(stripped)[0], "image/png")
+
+    def test_png_data_appended_after_the_end_is_discarded(self):
+        original = (uploads.PNG_SIGNATURE
+                    + png_chunk(b"IHDR", b"\x00" * 13)
+                    + png_chunk(b"IEND", b"")
+                    + b"a secret payload hidden past the end")
+        self.assertNotIn(b"secret", uploads.strip_png(original))
+
+    def test_jpeg_application_and_comment_segments_are_removed(self):
+        original = (b"\xff\xd8"
+                    + jpeg_segment(0xE1, b"Exif\x00\x00GPS 51.5074 N")
+                    + jpeg_segment(0xE0, b"JFIF\x00\x01\x02\x00")
+                    + jpeg_segment(0xFE, b"shot on a phone")
+                    + jpeg_segment(0xEE, b"Adobe\x00d\x00\x00\x00\x00")
+                    + jpeg_segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
+                    + jpeg_segment(0xDA, b"\x01\x01\x00\x00\x3f\x00")
+                    + b"\x12\x34\xff\xd9")
+        stripped = uploads.strip_jpeg(original)
+        self.assertIsNotNone(stripped)
+        self.assertNotIn(b"Exif", stripped)
+        self.assertNotIn(b"GPS", stripped)
+        self.assertNotIn(b"shot on a phone", stripped)
+        self.assertNotIn(b"JFIF", stripped)
+        self.assertIn(b"Adobe", stripped, "the colour-transform marker is not about the photographer")
+        self.assertIn(b"\x12\x34", stripped, "the scan data must survive")
+        self.assertTrue(stripped.startswith(b"\xff\xd8\xff"))
+        self.assertTrue(stripped.endswith(b"\xff\xd9"))
+
+    def test_jpeg_trailing_data_after_the_end_marker_is_discarded(self):
+        original = (b"\xff\xd8"
+                    + jpeg_segment(0xC0, b"\x08\x00\x01\x00\x01\x01\x01\x11\x00")
+                    + jpeg_segment(0xDA, b"\x01\x01\x00\x00\x3f\x00")
+                    + b"\x12\x34\xff\xd9" + b"appended thumbnail with its own exif")
+        self.assertNotIn(b"exif", uploads.strip_jpeg(original))
+
+    def test_gif_comment_and_foreign_extensions_are_removed(self):
+        original = (b"GIF89a" + b"\x01\x00\x01\x00\x00\x00\x00"
+                    + b"\x21\xfe" + gif_blocks(b"taken at home")
+                    + b"\x21\xff\x0bXMP DataXMP" + gif_blocks(b"<x:xmpmeta>GPS</x:xmpmeta>")
+                    + b"\x21\xff\x0bNETSCAPE2.0" + gif_blocks(b"\x01\x00\x00")
+                    + b"\x21\xf9" + gif_blocks(b"\x04\x00\x00\x00")
+                    + b"\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00" + b"\x02" + gif_blocks(b"\x4c\x01\x00")
+                    + b"\x3b")
+        stripped = uploads.strip_gif(original)
+        self.assertIsNotNone(stripped)
+        self.assertNotIn(b"taken at home", stripped)
+        self.assertNotIn(b"GPS", stripped)
+        self.assertNotIn(b"XMP Data", stripped)
+        self.assertIn(b"NETSCAPE2.0", stripped, "the loop count keeps animations looping")
+        self.assertIn(b"\x21\xf9", stripped, "frame timing must survive")
+        self.assertIn(b"\x4c\x01\x00", stripped, "the frame data must survive")
+        self.assertTrue(stripped.endswith(b"\x3b"))
+        self.assertEqual(uploads.detect_image_type(stripped)[0], "image/gif")
+
+    def test_webp_metadata_chunks_and_their_flags_are_removed(self):
+        original = (riff_chunk(b"VP8X", b"\x2e" + b"\x00" * 9)
+                    + riff_chunk(b"VP8 ", b"frame data")
+                    + riff_chunk(b"EXIF", b"GPS 51.5074 N")
+                    + riff_chunk(b"XMP ", b"<x:xmpmeta/>"))
+        original = b"RIFF" + (len(original) + 4).to_bytes(4, "little") + b"WEBP" + original
+        stripped = uploads.strip_webp(original)
+        self.assertIsNotNone(stripped)
+        self.assertNotIn(b"GPS", stripped)
+        self.assertNotIn(b"xmpmeta", stripped)
+        self.assertIn(b"frame data", stripped)
+        self.assertEqual(int.from_bytes(stripped[4:8], "little"), len(stripped) - 8,
+                         "the RIFF length must match the rebuilt file")
+        flags = stripped[stripped.index(b"VP8X") + 8]
+        self.assertEqual(flags & uploads.VP8X_METADATA_FLAGS, 0,
+                         "flags must not advertise metadata that is gone")
+        self.assertEqual(flags & 0x02, 0x02, "the animation flag must be left alone")
+        self.assertEqual(uploads.detect_image_type(stripped)[0], "image/webp")
+
+    def test_unparsable_images_are_rejected_rather_than_stored_unstripped(self):
+        truncated_png = uploads.PNG_SIGNATURE + png_chunk(b"IHDR", b"\x00" * 13)[:-4]
+        self.assertIsNone(uploads.strip_png(truncated_png))
+        self.assertIsNone(uploads.strip_png(b"not a png"))
+        self.assertIsNone(uploads.strip_jpeg(b"\xff\xd8\xff" + b"\x00" * 20))
+        self.assertIsNone(uploads.strip_gif(b"GIF89a" + b"\x01\x00\x01\x00\x00\x00\x00" + b"\x99"))
+        self.assertIsNone(uploads.strip_webp(b"RIFF" + (400).to_bytes(4, "little") + b"WEBP"))
+        self.assertIsNone(uploads.strip_metadata(b"anything", "image/svg+xml"))
 
     def test_upload_filenames_cannot_choose_storage_paths(self):
         self.assertEqual(uploads.safe_original_name("..%2F..%2Fprivate.png"), "private.png")

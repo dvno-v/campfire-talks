@@ -31,7 +31,7 @@ from .security import session_hash, valid_invite
 from .services.communities import is_member, list_active_invites, list_community_members, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
-from .uploads import detect_image_type, safe_original_name
+from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
 DISCONNECT_POLL_SECONDS = 2
@@ -581,6 +581,13 @@ class App(BaseHTTPRequestHandler):
         declared_type = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
         if declared_type not in {mime_type, "application/octet-stream"}:
             return self.error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "Declared file type does not match the image")
+        # Store the rebuilt image, never the bytes as uploaded: a photo carries
+        # where and when it was taken until that is removed.
+        content = strip_metadata(content, mime_type)
+        if content is None or detect_image_type(content) != detected:
+            return self.error(HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                              "That image could not be processed safely. Try re-exporting it")
+        stored_size = len(content)
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(UPLOAD_DIR, 0o700)  # mkdir's mode is subject to the umask; this is not
         storage_name = f"{secrets.token_hex(24)}{storage_extension}"
@@ -594,7 +601,8 @@ class App(BaseHTTPRequestHandler):
                 attachment_id = db.execute("""INSERT INTO attachments
                   (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
                   VALUES(?,?,?,?,?,?,?)""",
-                  (channel_id, user["id"], storage_name, original_name, mime_type, length, created)).lastrowid
+                  (channel_id, user["id"], storage_name, original_name, mime_type,
+                   stored_size, created)).lastrowid
                 message_id = db.execute("""INSERT INTO messages
                   (channel_id,author_id,body,created_at,attachment_id) VALUES(?,?,?,?,?)""",
                   (channel_id, user["id"], "", created, attachment_id)).lastrowid
@@ -605,7 +613,7 @@ class App(BaseHTTPRequestHandler):
             "id": message_id, "channel_id": channel_id, "body": "", "created_at": created,
             "author_id": user["id"], "username": user["username"], "edited_at": None,
             "attachment": {"id": attachment_id, "name": original_name,
-                           "mime_type": mime_type, "byte_size": length},
+                           "mime_type": mime_type, "byte_size": stored_size},
         }
         BROKER.publish({"type": "message.created", **message})
         self.send_json(message, HTTPStatus.CREATED)

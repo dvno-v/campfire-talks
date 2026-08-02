@@ -154,8 +154,13 @@ The request body is the raw image bytes. Required headers are `Content-Length`,
 `Content-Type`, and `X-Campfire-Filename` (the original filename encoded with
 `encodeURIComponent`). The default maximum is 8 MiB. PNG, JPEG, GIF, and WebP
 are accepted only when filename extension, declared MIME type, and file
-signature agree. A successful upload creates and broadcasts a message with an
-`attachment` object.
+signature agree.
+
+The stored image is rebuilt without EXIF, XMP, comments, timestamps, appended
+trailers or colour profiles, so `byte_size` describes the rewritten file rather
+than the number of bytes uploaded. An image that cannot be parsed exactly is
+rejected with `415` instead of being stored unstripped. A successful upload
+creates and broadcasts a message with an `attachment` object.
 
 ### `GET /api/attachments/{attachment_id}`
 

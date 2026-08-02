@@ -43,9 +43,19 @@ database.
 
 Images are stored under `data/uploads` by default using random server-generated
 names. The original filename, detected media type, byte size, uploader, and
-channel are stored in SQLite. Image metadata inside the uploaded bytes (for
-example EXIF location data) is **not stripped yet**; users should remove
-sensitive metadata before sharing.
+channel are stored in SQLite.
+
+Uploads are rebuilt from the parts a decoder needs before anything is written
+to disk, so the file that is stored and served is not the file that was sent. A
+photo from a phone normally carries the place and time it was taken; that is
+removed along with XMP, comments, timestamps, appended thumbnails and colour
+profiles. Removing profiles means images are interpreted as sRGB, which is a
+deliberate cost of not keeping camera-identifying data. An image that does not
+parse exactly as its format requires is refused rather than stored with
+metadata Campfire did not understand well enough to remove.
+
+This protects people in the channel from the uploader's camera. It is not a
+guarantee about steganography or data hidden inside the pixels themselves.
 
 ## Logs
 

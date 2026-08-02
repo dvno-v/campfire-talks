@@ -60,6 +60,10 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
   validation, random non-user-controlled storage names, and private authorized
   retrieval. SVG and arbitrary documents are rejected.
+- Uploads are rebuilt from the parts needed to decode them, discarding EXIF,
+  XMP, comments, timestamps, appended trailers and colour profiles, so a shared
+  photo does not carry where it was taken. Anything that does not parse exactly
+  as its format requires is refused rather than stored unstripped.
 - Live streams are bounded per host and per account, so opening connections
   cannot exhaust threads and memory; past the limit Campfire answers `503`.
 - Access logging is disabled unless the operator explicitly enables it.
@@ -83,9 +87,10 @@ standard library also recommends salted, tunably slow password derivation:
 - Messages are not end-to-end encrypted and are retained until someone deletes
   them. Deletion does not reach backups taken beforehand.
 - Voice and screen sharing are not implemented yet.
-- Image decoding/re-encoding, EXIF removal, malware scanning, and storage quotas
-  are not implemented yet. Signature checks are useful defense in depth, not
-  proof that an image is harmless.
+- Uploads are rebuilt without metadata, but Campfire does not decode pixels, so
+  this is not a defence against a malicious decoder input. Malware scanning and
+  storage quotas are not implemented. Signature checks are useful defence in
+  depth, not proof that an image is harmless.
 - The in-memory limiter resets on restart and is not shared across processes.
 - SQLite backups are not automatically encrypted.
 - Dependency/container scanning and a disclosure process are not yet automated.

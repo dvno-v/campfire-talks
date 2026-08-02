@@ -13,7 +13,8 @@ and the browser receives live messages over Server-Sent Events.
 - Authorized member lists with owner indicators and online presence
 - Persistent messages, editable by their author and removable by the author or
   community owner
-- Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit)
+- Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit), stored
+  with EXIF and other metadata removed
 - Live message delivery with automatic reconnect
 - Rate-limited authentication and restrictive browser security headers
 - Responsive three-panel chat UI

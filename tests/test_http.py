@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zlib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,11 +24,16 @@ temporary = tempfile.TemporaryDirectory()
 os.environ.setdefault("CAMPFIRE_DB", str(Path(temporary.name) / "http.db"))
 os.environ.setdefault("CAMPFIRE_UPLOAD_DIR", str(Path(temporary.name) / "uploads"))
 
-from campfire import database, realtime, security
+from campfire import config, database, realtime, security
 from campfire import http as campfire_http
 from campfire.http import App
 
 PASSWORD = "a sufficiently long password"
+
+
+def png_chunk(kind, payload):
+    return (len(payload).to_bytes(4, "big") + kind + payload
+            + zlib.crc32(kind + payload).to_bytes(4, "big"))
 
 
 class HTTPTests(unittest.TestCase):
@@ -285,6 +291,53 @@ class HTTPTests(unittest.TestCase):
                          cookie=self.owner_session)
             leaked = self.await_event(stream, lambda e: e.get("type") == "channel.created", timeout=1.5)
         self.assertIsNone(leaked, "a non-member must not learn about another community's channels")
+
+    def upload(self, cookie, content, filename="photo.png", content_type="image/png"):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request("POST", f"/api/channels/{self.channel_id}/uploads", content,
+                           {"Content-Type": content_type, "X-Campfire-Filename": filename,
+                            "Cookie": f"campfire_session={cookie}"})
+        response = connection.getresponse()
+        payload = json.loads(response.read() or b"null")
+        connection.close()
+        return response.status, payload
+
+    def test_an_uploaded_photo_is_stored_without_its_location(self):
+        user = self.signed_in_user("exif_uploader")
+        pixels = zlib.compress(b"\x00\xff\x00\x00")
+        original = (b"\x89PNG\r\n\x1a\n"
+                    + png_chunk(b"IHDR", (1).to_bytes(4, "big") + (1).to_bytes(4, "big") + b"\x08\x02\x00\x00\x00")
+                    + png_chunk(b"eXIf", b"GPS 51.5074 N 0.1278 W")
+                    + png_chunk(b"IDAT", pixels)
+                    + png_chunk(b"IEND", b""))
+        self.assertIn(b"GPS", original)
+
+        status, message = self.upload(user, original)
+        self.assertEqual(status, 201)
+        with database.connect() as db:
+            stored_name = db.execute("SELECT storage_name FROM attachments WHERE id=?",
+                                     (message["attachment"]["id"],)).fetchone()[0]
+        stored = (config.UPLOAD_DIR / stored_name).read_bytes()
+        self.assertNotIn(b"GPS", stored, "the location was written to disk")
+        self.assertIn(pixels, stored, "the image itself must survive")
+        self.assertEqual(message["attachment"]["byte_size"], len(stored),
+                         "the recorded size must describe the rewritten file, not the upload")
+
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request("GET", f"/api/attachments/{message['attachment']['id']}",
+                           headers={"Cookie": f"campfire_session={user}"})
+        response = connection.getresponse()
+        served = response.read()
+        connection.close()
+        self.assertEqual(int(response.getheader("Content-Length")), len(served))
+        self.assertNotIn(b"GPS", served)
+
+    def test_an_image_that_cannot_be_rebuilt_is_refused(self):
+        user = self.signed_in_user("broken_uploader")
+        truncated = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", b"\x00" * 13)[:-2]
+        status, payload = self.upload(user, truncated)
+        self.assertEqual(status, 415)
+        self.assertIn("could not be processed safely", payload["error"])
 
     def test_a_client_that_fell_behind_is_told_to_re_read(self):
         viewer = self.signed_in_user("resync_viewer")
