@@ -18,11 +18,14 @@ class RateLimiter:
         self.attempts = attempts
         self.window = window
         self._entries = {}
+        self._last_sweep = 0
         self._lock = threading.Lock()
 
     def allow(self, key, timestamp=None):
         timestamp = timestamp or time.time()
         with self._lock:
+            if timestamp - self._last_sweep >= self.window:
+                self._sweep(timestamp)
             recent = [seen for seen in self._entries.get(key, []) if seen > timestamp - self.window]
             if len(recent) >= self.attempts:
                 self._entries[key] = recent
@@ -30,6 +33,18 @@ class RateLimiter:
             recent.append(timestamp)
             self._entries[key] = recent
             return True
+
+    def _sweep(self, timestamp):
+        """Drop fully expired keys.
+
+        Keys embed caller-supplied values such as attempted usernames, so
+        without this an attacker could grow the table without bound simply by
+        varying the username on failed sign-in attempts.
+        """
+        cutoff = timestamp - self.window
+        for key in [key for key, seen in self._entries.items() if not seen or max(seen) <= cutoff]:
+            del self._entries[key]
+        self._last_sweep = timestamp
 
     def clear(self, key):
         with self._lock:

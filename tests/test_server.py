@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -114,6 +115,24 @@ class CampfireTests(unittest.TestCase):
         self.assertTrue(limiter.allow("client", timestamp=101))
         self.assertFalse(limiter.allow("client", timestamp=102))
         self.assertTrue(limiter.allow("client", timestamp=111))
+
+    def test_rate_limiter_forgets_expired_keys(self):
+        """Keys embed attempted usernames, so expired ones must not accumulate."""
+        limiter = security.RateLimiter(attempts=2, window=10)
+        limiter.allow("login:first", timestamp=100)
+        limiter.allow("login:second", timestamp=101)
+        self.assertEqual(len(limiter._entries), 2)
+        limiter.allow("login:later", timestamp=200)
+        self.assertEqual(set(limiter._entries), {"login:later"})
+
+    def test_startup_refuses_usernames_that_differ_only_by_case(self):
+        memory = sqlite3.connect(":memory:")
+        memory.row_factory = sqlite3.Row
+        memory.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)")
+        memory.execute("INSERT INTO users(username) VALUES('Sam'),('sam')")
+        with self.assertRaises(RuntimeError) as failure:
+            database.enforce_username_case_uniqueness(memory)
+        self.assertIn("Sam", str(failure.exception))
 
     def test_username_rules(self):
         self.assertTrue(security.USERNAME_RE.fullmatch("friendly_user"))

@@ -19,7 +19,7 @@ def initialize_database():
     with connect() as database:
         database.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-          id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+          id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
           password_hash TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sessions (
@@ -71,8 +71,32 @@ def initialize_database():
         message_columns = {row[1] for row in database.execute("PRAGMA table_info(messages)")}
         if "attachment_id" not in message_columns:
             database.execute("ALTER TABLE messages ADD COLUMN attachment_id INTEGER REFERENCES attachments(id)")
+        enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
+
+
+def enforce_username_case_uniqueness(database):
+    """Guarantee that usernames differing only by case cannot coexist.
+
+    Sign-in resolves usernames case-insensitively, so `Sam` and `sam` as
+    separate accounts would let the older row answer for both and lock the
+    newer account out of its own name. Databases created before this rule may
+    already hold such pairs; refuse to start rather than silently choosing a
+    winner. Usernames are restricted to ASCII, which SQLite's NOCASE collation
+    folds completely.
+    """
+    collisions = database.execute("""
+      SELECT group_concat(username, ', ') AS names FROM users
+      GROUP BY username COLLATE NOCASE HAVING COUNT(*) > 1
+    """).fetchall()
+    if collisions:
+        conflicting = "; ".join(row["names"] for row in collisions)
+        raise RuntimeError(
+            "Campfire cannot start: these accounts differ only by capitalization "
+            f"and must be renamed or removed first: {conflicting}")
+    database.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)")
 
 
 def utc_now():

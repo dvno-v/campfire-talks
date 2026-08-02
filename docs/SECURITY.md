@@ -25,6 +25,18 @@ encrypted. A compromised host, browser, or administrator can read them.
   operation scope per five-minute window. Addresses are not persisted.
 - Sessions use 256-bit random tokens, 30-day expiry, `HttpOnly`, and
   `SameSite=Strict`. Set `CAMPFIRE_SECURE_COOKIES=1` in HTTPS deployments.
+  Only a SHA-256 digest of each token is stored, and only the original token is
+  accepted, so a stolen database or backup yields no usable session.
+- Usernames are unique without regard to capitalization. Sign-in resolves them
+  case-insensitively, so allowing `Sam` and `sam` to coexist would let one
+  account answer for the other. Startup fails closed if an older database
+  already contains such a pair.
+- Requests with an unparsable body are answered exactly once and, where the
+  declared length cannot be trusted, the connection is closed. Two responses to
+  one request would let a shared proxy connection serve the second to another
+  client.
+- Rate-limiter keys include caller-supplied values such as attempted usernames,
+  so expired entries are swept to bound memory.
 - State-changing browser requests reject cross-site fetches and mismatched
   `Origin` headers.
 - Responses apply a same-origin Content Security Policy, deny framing and MIME

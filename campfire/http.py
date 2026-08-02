@@ -28,6 +28,14 @@ from .services.communities import list_active_invites, list_community_members
 from .services.communities import revoke_invite as revoke_community_invite
 from .uploads import detect_image_type, safe_original_name
 
+class InvalidBody(Exception):
+    """Raised once a malformed request body has already been answered.
+
+    Handlers must not continue after a rejected body: writing a second response
+    to the same request desynchronizes a keep-alive connection.
+    """
+
+
 class App(BaseHTTPRequestHandler):
     server_version = "Campfire"
     sys_version = ""
@@ -51,14 +59,26 @@ class App(BaseHTTPRequestHandler):
             print(f"[{self.log_date_time_string()}] {fmt % args}")
 
     def json_body(self):
+        """Return the request body as a JSON object, or raise InvalidBody."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length < 0 or length > 70_000:
-                self.close_connection = True
-                raise ValueError
-            return json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            length = -1
+        if not 0 <= length <= 70_000:
+            # The declared length is unusable, so the stream cannot be resynchronized.
+            self.close_connection = True
+            return self.reject_body("Invalid JSON body")
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
-            self.error(HTTPStatus.BAD_REQUEST, "Invalid JSON body")
+            return self.reject_body("Invalid JSON body")
+        if not isinstance(body, dict):
+            return self.reject_body("Request body must be a JSON object")
+        return body
+
+    def reject_body(self, message):
+        self.error(HTTPStatus.BAD_REQUEST, message)
+        raise InvalidBody(message)
 
     def send_json(self, value, status=HTTPStatus.OK, headers=None):
         payload = json.dumps(value, separators=(",", ":")).encode()
@@ -84,8 +104,8 @@ class App(BaseHTTPRequestHandler):
             row = db.execute("""
               SELECT users.id, users.username FROM sessions
               JOIN users ON users.id = sessions.user_id
-              WHERE token IN (?,?) AND expires_at > ?
-            """, (session_hash(token.value), token.value, int(time.time()))).fetchone()
+              WHERE token = ? AND expires_at > ?
+            """, (session_hash(token.value), int(time.time()))).fetchone()
         return dict(row) if row else None
 
     def require_user(self):
@@ -150,12 +170,15 @@ class App(BaseHTTPRequestHandler):
             "/api/invites": self.create_invite,
             "/api/invites/join": self.join_invite,
         }
-        if path in routes:
-            return routes[path]()
-        if path.startswith("/api/channels/") and path.endswith("/messages"):
-            return self.create_message(path)
-        if path.startswith("/api/channels/") and path.endswith("/uploads"):
-            return self.upload_attachment(path)
+        try:
+            if path in routes:
+                return routes[path]()
+            if path.startswith("/api/channels/") and path.endswith("/messages"):
+                return self.create_message(path)
+            if path.startswith("/api/channels/") and path.endswith("/uploads"):
+                return self.upload_attachment(path)
+        except InvalidBody:
+            return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_DELETE(self):
@@ -169,8 +192,6 @@ class App(BaseHTTPRequestHandler):
 
     def register(self):
         body = self.json_body()
-        if body is None:
-            return
         if not self.rate_limit_auth("register"):
             return
         username = str(body.get("username", "")).strip()
@@ -207,8 +228,6 @@ class App(BaseHTTPRequestHandler):
 
     def login(self):
         body = self.json_body()
-        if body is None:
-            return
         attempted_username = str(body.get("username", "")).strip()
         if not self.rate_limit_auth(f"login:{attempted_username}"):
             return
@@ -238,7 +257,7 @@ class App(BaseHTTPRequestHandler):
         token = cookies.get("campfire_session")
         if token:
             with connect() as db:
-                db.execute("DELETE FROM sessions WHERE token IN (?,?)", (session_hash(token.value), token.value))
+                db.execute("DELETE FROM sessions WHERE token = ?", (session_hash(token.value),))
         secure = "; Secure" if SECURE_COOKIES else ""
         return self.send_json({"ok": True}, headers={"Set-Cookie": f"campfire_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"})
 
@@ -265,7 +284,7 @@ class App(BaseHTTPRequestHandler):
         if not user:
             return
         body = self.json_body()
-        name = str((body or {}).get("name", "")).strip()
+        name = str(body.get("name", "")).strip()
         if not 2 <= len(name) <= 40:
             return self.error(HTTPStatus.BAD_REQUEST, "Community name must be 2–40 characters")
         with connect() as db:
@@ -308,7 +327,7 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        body = self.json_body() or {}
+        body = self.json_body()
         name = re.sub(r"[^a-z0-9-]", "-", str(body.get("name", "")).lower().strip()).strip("-")
         try:
             community_id = int(body.get("community_id"))
@@ -331,7 +350,7 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        body = self.json_body() or {}
+        body = self.json_body()
         try:
             community_id = int(body.get("community_id"))
             max_uses = min(25, max(1, int(body.get("max_uses", 10))))
@@ -369,7 +388,7 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        body = self.json_body() or {}
+        body = self.json_body()
         token = str(body.get("invite", "")).strip()
         with connect() as db:
             invitation = valid_invite(db, token)
@@ -422,7 +441,7 @@ class App(BaseHTTPRequestHandler):
             channel_id = int(path.split("/")[3])
         except ValueError:
             return self.error(HTTPStatus.BAD_REQUEST, "Invalid channel")
-        body = str((self.json_body() or {}).get("body", "")).strip()
+        body = str(self.json_body().get("body", "")).strip()
         if not 1 <= len(body) <= 4000:
             return self.error(HTTPStatus.BAD_REQUEST, "Message must be 1–4000 characters")
         created = utc_now()

@@ -10,7 +10,9 @@ async function api(path, options = {}) {
 }
 
 function initials(name) { return name.slice(0, 2).toUpperCase(); }
-function escapeHTML(value) { const node = document.createElement('span'); node.textContent = value; return node.innerHTML; }
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+// Values are interpolated into attributes as well as text, so quotes must escape too.
+function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (character) => HTML_ESCAPES[character]); }
 function showAuth() { $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden'); }
 
 async function enterApp() {
