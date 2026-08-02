@@ -111,7 +111,8 @@ Adds an existing account to the invitation’s community.
 ### `GET /api/channels/{channel_id}/messages`
 
 Returns the latest 100 messages in ascending order. `?after={message_id}` may be
-used to request only newer messages.
+used to request only newer messages. Edited messages carry an `edited_at`
+timestamp; unedited ones carry `null`.
 
 ### `POST /api/channels/{channel_id}/messages`
 
@@ -121,6 +122,24 @@ used to request only newer messages.
 
 Message bodies contain 1–4000 characters. Both reads and writes require current
 community membership.
+
+### `PATCH /api/messages/{message_id}`
+
+```json
+{"body": "the corrected text"}
+```
+
+Only the message's author may edit it; community ownership does not confer the
+right to rewrite another person's words, so owners receive `403`. The response
+is the updated message with `edited_at` set. Messages carrying an image return
+`409` because their content is the file, which can only be deleted.
+
+### `DELETE /api/messages/{message_id}`
+
+Deletes a message when requested by its author or by the owner of its
+community. Any attachment it carries is removed from the database and from disk
+in the same operation. Members without either right receive `403`; users outside
+the community receive `404` rather than learning that the message exists.
 
 ### `POST /api/channels/{channel_id}/uploads`
 
@@ -139,7 +158,15 @@ still a member of its channel’s community. Responses use `no-store` and
 
 ### `GET /api/events`
 
-Opens a Server-Sent Events stream. Each `data` event contains a message object.
+Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
+`channel_id`:
+
+| `type` | Payload |
+| --- | --- |
+| `message.created` | the new message object |
+| `message.updated` | the edited message object, including `edited_at` |
+| `message.deleted` | `id` and `channel_id` only |
+
 The server checks the connected user’s channel membership again before sending
 each event and emits a keepalive every 20 seconds.
 

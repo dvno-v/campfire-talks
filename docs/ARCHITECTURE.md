@@ -56,8 +56,10 @@ separate self-hosted SFU.
 ## Next structural step
 
 `campfire/http.py` intentionally remains the composition point. Community
-member lookup is the first extracted domain service; account and message
-workflows will follow as role management and deletion arrive.
+membership and message ownership are the extracted domain services so far;
+account workflows will follow as role management arrives. `services/messages.py`
+decides who may edit or delete, while the HTTP layer keeps the decision about
+which status code reveals what.
 Those service functions should accept an explicit database connection and
 actor identity, making authorization testable without opening a socket.
 

@@ -43,6 +43,10 @@ encrypted. A compromised host, browser, or administrator can read them.
   sniffing, disable indexing, and restrict camera, microphone, and display
   capture to the application origin.
 - Every channel read, write, and live event verifies community membership.
+- Editing a message requires authorship; deleting one requires authorship or
+  ownership of its community. Ownership deliberately does not grant the right to
+  rewrite another member's words, only to remove them. Non-members receive
+  `404` rather than a denial that would confirm the message exists.
 - Community member lists verify the requesting actor's current membership and
   return `404` to outsiders rather than revealing whether a community exists.
 - Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
@@ -64,8 +68,10 @@ standard library also recommends salted, tunably slow password derivation:
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
 - There is no multi-factor authentication, password reset, session management
-  screen, account deletion, invite revocation UI, or moderator role model.
-- Messages are not end-to-end encrypted and are retained indefinitely.
+  screen, account deletion, or moderator role model. Deletion is currently the
+  only moderation action, and only the community owner has it.
+- Messages are not end-to-end encrypted and are retained until someone deletes
+  them. Deletion does not reach backups taken beforehand.
 - Voice and screen sharing are not implemented yet.
 - Image decoding/re-encoding, EXIF removal, malware scanning, and storage quotas
   are not implemented yet. Signature checks are useful defense in depth, not

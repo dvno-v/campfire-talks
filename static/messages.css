@@ -1,0 +1,89 @@
+.message-row {
+  position: relative;
+}
+
+.message-actions {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  padding: 2px;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  top: -12px;
+}
+
+.message-row:hover .message-actions,
+.message-row:focus-within .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Without hover there is no other way to reach these controls. */
+@media (hover: none) {
+  .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.message-actions button {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 8px;
+}
+
+.message-actions button:hover {
+  background: #1118;
+  color: var(--ink);
+}
+
+.message-actions button[data-delete-message]:hover {
+  color: var(--danger);
+}
+
+.message-edited {
+  color: #8f9099;
+  font-size: 11px;
+}
+
+.message-edit textarea {
+  background: #1c1d22;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  padding: 8px 10px;
+  resize: vertical;
+  width: 100%;
+}
+
+.message-edit-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.message-edit-actions button {
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 6px 12px;
+}
+
+.message-edit-actions button[data-cancel-edit] {
+  background: none;
+  color: var(--muted);
+}
+
+.message-edit-actions button[data-cancel-edit]:hover {
+  color: var(--ink);
+}

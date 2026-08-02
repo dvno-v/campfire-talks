@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { user: null, communities: [], community: null, channel: null, members: [], eventSource: null };
+const state = { user: null, communities: [], community: null, channel: null, members: [], messages: new Map(), eventSource: null };
 let registering = false;
 
 async function api(path, options = {}) {
@@ -24,8 +24,11 @@ async function enterApp() {
   selectCommunity(state.communities[0]);
   state.eventSource?.close(); state.eventSource = new EventSource('/api/events');
   state.eventSource.onmessage = ({ data }) => {
-    const message = JSON.parse(data);
-    if (message.channel_id === state.channel?.id && !document.querySelector(`[data-message-id="${message.id}"]`)) appendMessage(message);
+    const event = JSON.parse(data);
+    if (event.channel_id !== state.channel?.id) return;
+    if (event.type === 'message.deleted') return removeMessage(event.id);
+    if (event.type === 'message.updated') return replaceMessage(event);
+    if (!document.querySelector(`[data-message-id="${Number(event.id)}"]`)) appendMessage(event);
   };
 }
 
@@ -45,7 +48,7 @@ function selectCommunity(community) {
 }
 
 async function loadMembers(communityId) {
-  try { const data=await api(`/api/communities/${communityId}/members`); if(state.community?.id!==communityId)return; state.members=data.members; renderMembers(); decorateOwnerIndicators(); }
+  try { const data=await api(`/api/communities/${communityId}/members`); if(state.community?.id!==communityId)return; state.members=data.members; renderMembers(); refreshMessages(); }
   catch(error) { if(state.community?.id===communityId) $('#member-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; }
 }
 
@@ -56,7 +59,8 @@ function renderMembers() {
 }
 
 function isOwner(userId) { return state.members.some(member => member.id===Number(userId) && member.role==='owner'); }
-function decorateOwnerIndicators() { document.querySelectorAll('.message-row').forEach(row => { const meta=row.querySelector('.message-meta'); const existing=meta.querySelector('.owner-indicator'); if(isOwner(row.dataset.authorId) && !existing) meta.querySelector('strong').insertAdjacentHTML('afterend','<span class="owner-indicator">OWNER</span>'); else if(!isOwner(row.dataset.authorId)) existing?.remove(); }); }
+// Owner badges and delete rights both depend on the member list, which arrives after the first messages.
+function refreshMessages() { document.querySelectorAll('.message-row').forEach(row => { const message=state.messages.get(Number(row.dataset.messageId)); if(message) renderInto(row, message); }); }
 
 async function selectChannel(channel) {
   state.channel = channel;
@@ -64,16 +68,62 @@ async function selectChannel(channel) {
   $('#channel-name').textContent = channel.name; $('#message').placeholder = `Message #${channel.name}`;
   document.querySelectorAll('.channel').forEach(b => b.classList.toggle('active', +b.dataset.id === channel.id));
   const data = await api(`/api/channels/${channel.id}/messages`);
+  state.messages.clear();
   $('#messages').innerHTML = '<div class="empty"><div>#</div><h2>Welcome to #' + escapeHTML(channel.name) + '</h2><p>This is the beginning of the channel.</p></div>';
   data.messages.forEach(appendMessage); scrollMessages();
 }
 
-function appendMessage(message) {
-  const row = document.createElement('article'); row.className = 'message-row'; row.dataset.messageId = message.id; row.dataset.authorId = message.author_id;
+function messageActions(message) {
+  const authored = message.author_id === state.user?.id;
+  if (!authored && !isOwner(state.user?.id)) return '';
+  const edit = authored && !message.attachment ? `<button type="button" data-edit-message title="Edit message">Edit</button>` : '';
+  return `<div class="message-actions">${edit}<button type="button" data-delete-message title="Delete message">Delete</button></div>`;
+}
+
+function messageMarkup(message) {
   const date = new Date(message.created_at);
   const attachment = message.attachment ? `<a class="message-attachment" href="/api/attachments/${Number(message.attachment.id)}" target="_blank" rel="noopener"><img src="/api/attachments/${Number(message.attachment.id)}" alt="${escapeHTML(message.attachment.name)}" loading="lazy"><span>${escapeHTML(message.attachment.name)} · ${formatBytes(message.attachment.byte_size)}</span></a>` : '';
-  row.innerHTML = `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${isOwner(message.author_id)?'<span class="owner-indicator">OWNER</span>':''}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time></div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>`;
+  const edited = message.edited_at ? `<span class="message-edited" title="Edited ${escapeHTML(new Date(message.edited_at).toLocaleString())}">(edited)</span>` : '';
+  return `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${isOwner(message.author_id)?'<span class="owner-indicator">OWNER</span>':''}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time>${edited}</div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>${messageActions(message)}`;
+}
+
+function renderInto(row, message) {
+  state.messages.set(Number(message.id), message);
+  row.innerHTML = messageMarkup(message);
+  row.querySelector('[data-edit-message]')?.addEventListener('click', () => startEdit(message));
+  row.querySelector('[data-delete-message]')?.addEventListener('click', () => deleteMessage(message));
+}
+
+function appendMessage(message) {
+  const row = document.createElement('article'); row.className = 'message-row'; row.dataset.messageId = message.id; row.dataset.authorId = message.author_id;
+  renderInto(row, message);
   $('#messages').append(row); scrollMessages();
+}
+
+function replaceMessage(message) { const row=document.querySelector(`[data-message-id="${Number(message.id)}"]`); if(row) renderInto(row, message); }
+function removeMessage(messageId) { document.querySelector(`[data-message-id="${Number(messageId)}"]`)?.remove(); state.messages.delete(Number(messageId)); }
+
+function startEdit(message) {
+  const row = document.querySelector(`[data-message-id="${Number(message.id)}"]`); if (!row) return;
+  const container = row.querySelector('.message-body');
+  container.innerHTML = `<form class="message-edit"><textarea rows="2" maxlength="4000"></textarea><div class="message-edit-actions"><button type="submit" class="primary">Save</button><button type="button" data-cancel-edit>Cancel</button></div></form>`;
+  const field = container.querySelector('textarea'); field.value = message.body; field.focus(); field.setSelectionRange(field.value.length, field.value.length);
+  const cancel = () => replaceMessage(message);
+  container.querySelector('[data-cancel-edit]').onclick = cancel;
+  field.onkeydown = event => { if (event.key === 'Escape') cancel(); if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); container.querySelector('form').requestSubmit(); } };
+  container.querySelector('form').onsubmit = async event => {
+    event.preventDefault();
+    const body = field.value.trim(); if (!body) return;
+    if (body === message.body) return cancel();
+    try { replaceMessage(await api(`/api/messages/${Number(message.id)}`, { method:'PATCH', body:JSON.stringify({ body }) })); }
+    catch (error) { alert(error.message); cancel(); }
+  };
+}
+
+async function deleteMessage(message) {
+  if (!confirm(message.attachment ? 'Delete this image? The file is removed from the server.' : 'Delete this message?')) return;
+  try { await api(`/api/messages/${Number(message.id)}`, { method:'DELETE' }); removeMessage(message.id); }
+  catch (error) { alert(error.message); }
 }
 function scrollMessages() { const list = $('#messages'); list.scrollTop = list.scrollHeight; }
 function formatBytes(value) { const bytes=Number(value)||0; return bytes < 1024*1024 ? `${Math.ceil(bytes/1024)} KB` : `${(bytes/1024/1024).toFixed(1)} MB`; }

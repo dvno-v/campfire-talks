@@ -43,7 +43,7 @@ def initialize_database():
         CREATE TABLE IF NOT EXISTS messages (
           id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
           author_id INTEGER NOT NULL REFERENCES users(id), body TEXT NOT NULL, created_at TEXT NOT NULL,
-          attachment_id INTEGER REFERENCES attachments(id)
+          attachment_id INTEGER REFERENCES attachments(id), edited_at TEXT
         );
         CREATE TABLE IF NOT EXISTS invitations (
           id INTEGER PRIMARY KEY,
@@ -71,6 +71,8 @@ def initialize_database():
         message_columns = {row[1] for row in database.execute("PRAGMA table_info(messages)")}
         if "attachment_id" not in message_columns:
             database.execute("ALTER TABLE messages ADD COLUMN attachment_id INTEGER REFERENCES attachments(id)")
+        if "edited_at" not in message_columns:
+            database.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
@@ -104,12 +106,14 @@ def utc_now():
 
 
 def message_from_row(row):
+    columns = row.keys()
     message = {
         "id": row["id"], "channel_id": row["channel_id"], "body": row["body"],
         "created_at": row["created_at"], "author_id": row["author_id"], "username": row["username"],
+        "edited_at": row["edited_at"] if "edited_at" in columns else None,
         "attachment": None,
     }
-    if "attachment_id" in row.keys() and row["attachment_id"] is not None:
+    if "attachment_id" in columns and row["attachment_id"] is not None:
         message["attachment"] = {
             "id": row["attachment_id"], "name": row["original_name"],
             "mime_type": row["mime_type"], "byte_size": row["byte_size"],

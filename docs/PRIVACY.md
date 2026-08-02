@@ -10,8 +10,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Username and password hash | Authentication | Until manually deleted |
 | Session-token digest and user link | Staying signed in | 30 days; expired rows are removed at startup |
 | Communities and memberships | Authorization | Until manually deleted |
-| Channel messages | Conversation history | Indefinite |
-| Shared images and metadata | User-requested image sharing | Indefinite |
+| Channel messages | Conversation history | Indefinite, until deleted by the author or community owner |
+| Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or community owner |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
 
 Raw passwords and raw invite codes are never stored. Campfire does not persist
@@ -25,6 +25,14 @@ persistent data beyond existing accounts and memberships.
 Only a community owner can list its active invite metadata. Campfire cannot
 display a previously created raw code because only its digest is retained;
 revocation deletes that digest and its usage metadata immediately.
+
+Deleting a message removes its row immediately. When that message carried an
+image, the attachment record and the stored file are removed with it, so the
+bytes stop being retrievable rather than merely becoming unreferenced. Backups
+taken before a deletion still contain the content until they are rotated. An
+edited message keeps no previous version: Campfire overwrites the body and
+records only that an edit happened, so history cannot be recovered from the
+database.
 
 Images are stored under `data/uploads` by default using random server-generated
 names. The original filename, detected media type, byte size, uploader, and

@@ -11,7 +11,8 @@ and the browser receives live messages over Server-Sent Events.
 - Owner-only active invite management and immediate revocation
 - Communities and text channels
 - Authorized member lists with owner indicators
-- Persistent messages
+- Persistent messages, editable by their author and removable by the author or
+  community owner
 - Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit)
 - Live message delivery with automatic reconnect
 - Rate-limited authentication and restrictive browser security headers
@@ -41,7 +42,7 @@ python3 -m unittest discover -s tests -v
 
 ## Near-term roadmap
 
-1. Roles, invite revocation, moderation, and message editing/deletion
+1. Roles, moderation beyond deletion, and online presence
 2. Direct messages, unread counts, and notifications
 3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
 4. Voice rooms through a dedicated WebRTC SFU

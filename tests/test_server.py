@@ -10,6 +10,7 @@ os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, security, uploads
 from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
+from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 
 
 class CampfireTests(unittest.TestCase):
@@ -108,6 +109,70 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual([member["role"] for member in visible], ["owner", "member"])
         self.assertEqual(visible[0]["id"], owner_id)
         self.assertIsNone(hidden)
+
+    def message_fixture(self, db, label, attachment=False):
+        """Build an owner, an author, a bystander, an outsider, and one message."""
+        actors = {}
+        for role in ("owner", "author", "bystander", "outsider"):
+            actors[role] = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                      (f"{label}_{role}", "unused", database.utc_now())).lastrowid
+        community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                  (label, actors["owner"], database.utc_now())).lastrowid
+        for role in ("owner", "author", "bystander"):
+            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, actors[role]))
+        channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                                (community_id, "general", database.utc_now())).lastrowid
+        attachment_id = None
+        if attachment:
+            attachment_id = db.execute("""INSERT INTO attachments
+              (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (channel_id, actors["author"], f"{label}_stored.png", "photo.png", "image/png", 12,
+               database.utc_now())).lastrowid
+        message_id = db.execute("""INSERT INTO messages
+          (channel_id,author_id,body,created_at,attachment_id) VALUES(?,?,?,?,?)""",
+          (channel_id, actors["author"], "original text", database.utc_now(), attachment_id)).lastrowid
+        return actors, message_id
+
+    def test_only_the_author_may_edit_a_message(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "edit_rules")
+            self.assertTrue(may_edit(visible_message(db, message_id, actors["author"])))
+            self.assertFalse(may_edit(visible_message(db, message_id, actors["owner"])))
+            self.assertFalse(may_edit(visible_message(db, message_id, actors["bystander"])))
+            apply_edit(db, message_id, "corrected text", "2026-01-01T00:00:00Z")
+            edited = visible_message(db, message_id, actors["author"])
+        self.assertEqual(edited["body"], "corrected text")
+        self.assertEqual(edited["edited_at"], "2026-01-01T00:00:00Z")
+
+    def test_author_and_community_owner_may_delete_but_others_may_not(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "delete_rules")
+            self.assertTrue(may_delete(visible_message(db, message_id, actors["author"])))
+            self.assertTrue(may_delete(visible_message(db, message_id, actors["owner"])))
+            self.assertFalse(may_delete(visible_message(db, message_id, actors["bystander"])))
+
+    def test_messages_are_invisible_outside_their_community(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "visibility")
+            self.assertIsNone(visible_message(db, message_id, actors["outsider"]))
+
+    def test_deleting_a_message_removes_its_attachment_row(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "attachment_delete", attachment=True)
+            message = visible_message(db, message_id, actors["owner"])
+            orphaned = remove_message(db, message)
+            remaining_message = db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone()
+            remaining_attachment = db.execute("SELECT 1 FROM attachments WHERE storage_name=?",
+                                              ("attachment_delete_stored.png",)).fetchone()
+        self.assertEqual(orphaned, "attachment_delete_stored.png")
+        self.assertIsNone(remaining_message)
+        self.assertIsNone(remaining_attachment)
+
+    def test_deleting_a_text_message_orphans_no_file(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "text_delete")
+            self.assertIsNone(remove_message(db, visible_message(db, message_id, actors["author"])))
 
     def test_rate_limiter_window(self):
         limiter = security.RateLimiter(attempts=2, window=10)

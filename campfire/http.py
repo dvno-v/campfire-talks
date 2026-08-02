@@ -26,6 +26,7 @@ from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAM
 from .security import invite_hash, password_hash, password_matches, session_hash, valid_invite
 from .services.communities import list_active_invites, list_community_members
 from .services.communities import revoke_invite as revoke_community_invite
+from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .uploads import detect_image_type, safe_original_name
 
 class InvalidBody(Exception):
@@ -112,7 +113,8 @@ class App(BaseHTTPRequestHandler):
         user = self.current_user()
         if user:
             return user
-        if self.command == "POST":
+        if self.command != "GET":
+            # The unread request body would otherwise desynchronize the connection.
             self.close_connection = True
         return self.error(HTTPStatus.UNAUTHORIZED, "Sign in required")
 
@@ -186,8 +188,25 @@ class App(BaseHTTPRequestHandler):
             self.close_connection = True
             return self.error(HTTPStatus.FORBIDDEN, "Cross-origin request blocked")
         path = urlparse(self.path).path
-        if path.startswith("/api/invites/"):
-            return self.revoke_invite(path)
+        try:
+            if path.startswith("/api/invites/"):
+                return self.revoke_invite(path)
+            if path.startswith("/api/messages/"):
+                return self.delete_message(path)
+        except InvalidBody:
+            return
+        return self.error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def do_PATCH(self):
+        if not self.valid_request_source():
+            self.close_connection = True
+            return self.error(HTTPStatus.FORBIDDEN, "Cross-origin request blocked")
+        path = urlparse(self.path).path
+        try:
+            if path.startswith("/api/messages/"):
+                return self.edit_message(path)
+        except InvalidBody:
+            return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
 
     def register(self):
@@ -426,7 +445,7 @@ class App(BaseHTTPRequestHandler):
         with connect() as db:
             if not self.member_channel(db, channel_id, user["id"]):
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
-            rows = db.execute("""SELECT m.id,m.channel_id,m.body,m.created_at,m.attachment_id,
+            rows = db.execute("""SELECT m.id,m.channel_id,m.body,m.created_at,m.edited_at,m.attachment_id,
               u.id author_id,u.username,a.original_name,a.mime_type,a.byte_size
               FROM messages m JOIN users u ON u.id=m.author_id
               LEFT JOIN attachments a ON a.id=m.attachment_id
@@ -451,9 +470,61 @@ class App(BaseHTTPRequestHandler):
             message_id = db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
                                     (channel_id, user["id"], body, created)).lastrowid
         message = {"id": message_id, "channel_id": channel_id, "body": body, "created_at": created,
-                   "author_id": user["id"], "username": user["username"], "attachment": None}
-        BROKER.publish(message)
+                   "author_id": user["id"], "username": user["username"], "edited_at": None,
+                   "attachment": None}
+        BROKER.publish({"type": "message.created", **message})
         self.send_json(message, HTTPStatus.CREATED)
+
+    def message_id_from(self, path):
+        try:
+            return int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid message")
+
+    def edit_message(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        message_id = self.message_id_from(path)
+        if message_id is None:
+            return
+        body = str(self.json_body().get("body", "")).strip()
+        if not 1 <= len(body) <= 4000:
+            return self.error(HTTPStatus.BAD_REQUEST, "Message must be 1–4000 characters")
+        edited = utc_now()
+        with connect() as db:
+            message = visible_message(db, message_id, user["id"])
+            if not message:
+                return self.error(HTTPStatus.NOT_FOUND, "Message not found")
+            if not may_edit(message):
+                return self.error(HTTPStatus.FORBIDDEN, "Only the author can edit a message")
+            if message["attachment_id"] is not None:
+                return self.error(HTTPStatus.CONFLICT, "Shared images cannot be edited, only deleted")
+            apply_edit(db, message_id, body, edited)
+        updated = message_from_row(message) | {"body": body, "edited_at": edited}
+        BROKER.publish({"type": "message.updated", **updated})
+        self.send_json(updated)
+
+    def delete_message(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        message_id = self.message_id_from(path)
+        if message_id is None:
+            return
+        with connect() as db:
+            message = visible_message(db, message_id, user["id"])
+            if not message:
+                return self.error(HTTPStatus.NOT_FOUND, "Message not found")
+            if not may_delete(message):
+                return self.error(HTTPStatus.FORBIDDEN,
+                                  "Only the author or the community owner can delete a message")
+            channel_id = message["channel_id"]
+            orphaned_file = remove_message(db, message)
+        if orphaned_file:
+            (UPLOAD_DIR / orphaned_file).unlink(missing_ok=True)
+        BROKER.publish({"type": "message.deleted", "id": message_id, "channel_id": channel_id})
+        self.send_json({"ok": True})
 
     def upload_attachment(self, path):
         user = self.require_user()
@@ -509,11 +580,11 @@ class App(BaseHTTPRequestHandler):
             raise
         message = {
             "id": message_id, "channel_id": channel_id, "body": "", "created_at": created,
-            "author_id": user["id"], "username": user["username"],
+            "author_id": user["id"], "username": user["username"], "edited_at": None,
             "attachment": {"id": attachment_id, "name": original_name,
                            "mime_type": mime_type, "byte_size": length},
         }
-        BROKER.publish(message)
+        BROKER.publish({"type": "message.created", **message})
         self.send_json(message, HTTPStatus.CREATED)
 
     def serve_attachment(self, path):

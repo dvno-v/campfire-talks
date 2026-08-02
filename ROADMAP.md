@@ -25,7 +25,7 @@ Status: in progress
 - [x] Authorized PNG/JPEG/GIF/WebP sharing with bounded private storage
 - [x] Member list with owner indicators
 - [ ] Online presence
-- [ ] Message edit/delete with clear ownership rules
+- [x] Message edit/delete with clear ownership rules
 - [x] Owner invite list and immediate invite revocation
 - [ ] Unread markers and basic notification preferences
 
@@ -40,7 +40,8 @@ does not lose data; all persistent data is documented.
 - Account password change, active-session list, and remote session revocation
 - Per-community message and attachment retention settings
 - User account deletion and operator-assisted data export
-- Attachment deletion when its message is removed
+- Attachment deletion when its message is removed *(delivered with message
+  deletion in Milestone 1)*
 - Storage quota and visible disk-usage reporting
 
 Exit criteria: a community owner can manage abuse and retention without editing

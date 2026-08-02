@@ -38,8 +38,11 @@ class HTTPTests(unittest.TestCase):
             cls.community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                           ("HTTP Tests", cls.owner_id, database.utc_now())).lastrowid
             db.execute("INSERT INTO memberships VALUES(?,?)", (cls.community_id, cls.owner_id))
-            db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
-                       (cls.community_id, "general", database.utc_now()))
+            cls.channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                                        (cls.community_id, "general", database.utc_now())).lastrowid
+            cls.owner_session = secrets.token_urlsafe(32)
+            db.execute("INSERT INTO sessions VALUES(?,?,?)",
+                       (security.session_hash(cls.owner_session), cls.owner_id, int(time.time()) + 600))
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), App)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -73,16 +76,23 @@ class HTTPTests(unittest.TestCase):
                int(time.time()) + 600, 5, database.utc_now()))
         return token
 
-    def signed_in_user(self, username):
-        """Create a member with an active session, without paying for a password hash."""
+    def signed_in_user(self, username, member=True):
+        """Create a user with an active session, without paying for a password hash."""
         token = secrets.token_urlsafe(32)
         with database.connect() as db:
             user_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
                                  (username, "unused", database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (self.community_id, user_id))
+            if member:
+                db.execute("INSERT INTO memberships VALUES(?,?)", (self.community_id, user_id))
             db.execute("INSERT INTO sessions VALUES(?,?,?)",
                        (security.session_hash(token), user_id, int(time.time()) + 600))
         return token
+
+    def post_message(self, cookie, body="original text"):
+        status, message, _ = self.request("POST", f"/api/channels/{self.channel_id}/messages",
+                                          {"body": body}, cookie=cookie)
+        self.assertEqual(status, 201)
+        return message
 
     def test_registration_stores_only_a_session_digest(self):
         status, _, session = self.request("POST", "/api/register", {
@@ -148,6 +158,44 @@ class HTTPTests(unittest.TestCase):
         connection.close()
         self.assertEqual(received.count(b"HTTP/1.1 "), 1)
         self.assertIn(b"400 Bad Request", received)
+
+    def test_only_the_author_may_edit_over_http(self):
+        author = self.signed_in_user("http_edit_author")
+        bystander = self.signed_in_user("http_edit_bystander")
+        message = self.post_message(author, "first draft")
+
+        status, _, _ = self.request("PATCH", f"/api/messages/{message['id']}", {"body": "tampered"}, cookie=bystander)
+        self.assertEqual(status, 403)
+        status, _, _ = self.request("PATCH", f"/api/messages/{message['id']}", {"body": "rewritten"},
+                                    cookie=self.owner_session)
+        self.assertEqual(status, 403, "community ownership must not confer the right to rewrite others' words")
+
+        status, updated, _ = self.request("PATCH", f"/api/messages/{message['id']}", {"body": "second draft"},
+                                          cookie=author)
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["body"], "second draft")
+        self.assertIsNotNone(updated["edited_at"])
+
+    def test_community_owner_may_delete_a_members_message(self):
+        author = self.signed_in_user("http_moderated_author")
+        message = self.post_message(author, "needs moderation")
+        status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=self.owner_session)
+        self.assertEqual(status, 200)
+        status, _, _ = self.request("PATCH", f"/api/messages/{message['id']}", {"body": "back"}, cookie=author)
+        self.assertEqual(status, 404)
+
+    def test_bystanders_cannot_delete_and_outsiders_cannot_see(self):
+        author = self.signed_in_user("http_delete_author")
+        bystander = self.signed_in_user("http_delete_bystander")
+        outsider = self.signed_in_user("http_delete_outsider", member=False)
+        message = self.post_message(author)
+
+        status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=bystander)
+        self.assertEqual(status, 403)
+        status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=outsider)
+        self.assertEqual(status, 404, "outsiders must not learn that the message exists")
+        status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=author)
+        self.assertEqual(status, 200)
 
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
