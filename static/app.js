@@ -1,5 +1,5 @@
 const $ = (s) => document.querySelector(s);
-const state = { user: null, communities: [], community: null, channel: null, members: [], online: new Set(), messages: new Map(), eventSource: null };
+const state = { user: null, communities: [], community: null, channel: null, members: [], online: new Set(), messages: new Map(), eventSource: null, streamOpened: false };
 let registering = false;
 
 async function api(path, options = {}) {
@@ -24,9 +24,16 @@ async function enterApp() {
   state.eventSource?.close(); state.eventSource = new EventSource('/api/events');
   // The member list reports who is connected, so re-read it once this stream is
   // registered — on first open and again after any automatic reconnect.
-  state.eventSource.onopen = () => { if (state.community) loadMembers(state.community.id); };
+  state.eventSource.onopen = () => {
+    if (state.community) loadMembers(state.community.id);
+    // A reconnect means the stream was down for a while; anything sent during
+    // the gap was never delivered, so re-read the channel rather than trust it.
+    if (state.streamOpened) resyncChannel();
+    state.streamOpened = true;
+  };
   state.eventSource.onmessage = ({ data }) => {
     const event = JSON.parse(data);
+    if (event.type === 'stream.reset') return resyncChannel();
     if (event.type.startsWith('presence.')) return applyPresence(event);
     if (event.type === 'member.joined') return applyMemberJoined(event);
     if (event.type === 'channel.created') return applyChannelCreated(event);
@@ -94,6 +101,10 @@ function applyMemberJoined(event) {
   state.members = sortMembers([...state.members, event.member]);
   renderMembers();
 }
+
+// Re-reads the channel outright: a gap can hide edits and deletions too, not
+// only new messages, so appending what is missing would not be enough.
+function resyncChannel() { if (state.channel) selectChannel(state.channel); }
 
 function applyChannelCreated(event) {
   const community = state.communities.find(c => c.id === event.community_id);

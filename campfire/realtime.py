@@ -10,31 +10,46 @@ import threading
 from collections import Counter
 
 
+class Subscription:
+    """One open event stream.
+
+    `missed` records that this stream fell behind. A client that quietly loses
+    events ends up showing a transcript that is wrong without saying so, which
+    is worse than telling it to re-read the channel.
+    """
+
+    def __init__(self, user_id):
+        self.user_id = user_id
+        self.events = queue.Queue(maxsize=50)
+        self.missed = threading.Event()
+
+
 class Broker:
     def __init__(self):
         self._lock = threading.Lock()
-        self._clients = {}
+        self._subscriptions = set()
         self._connections = Counter()
 
     def subscribe(self, user_id):
         """Register a stream, reporting whether it made the user newly online."""
-        channel = queue.Queue(maxsize=50)
+        subscription = Subscription(user_id)
         with self._lock:
             became_online = self._connections[user_id] == 0
             self._connections[user_id] += 1
-            self._clients[channel] = user_id
-        return channel, became_online
+            self._subscriptions.add(subscription)
+        return subscription, became_online
 
-    def unsubscribe(self, channel):
+    def unsubscribe(self, subscription):
         """Drop a stream, reporting whether it was that user's last one.
 
         One person commonly has several tabs open, so going offline means the
         last stream closing, not any stream closing.
         """
         with self._lock:
-            user_id = self._clients.pop(channel, None)
-            if user_id is None:
+            if subscription not in self._subscriptions:
                 return None, False
+            self._subscriptions.discard(subscription)
+            user_id = subscription.user_id
             self._connections[user_id] -= 1
             went_offline = self._connections[user_id] <= 0
             if went_offline:
@@ -45,14 +60,19 @@ class Broker:
         with self._lock:
             return frozenset(self._connections)
 
+    def stream_counts(self):
+        """Total open streams, and how many belong to each user."""
+        with self._lock:
+            return len(self._subscriptions), dict(self._connections)
+
     def publish(self, event):
         with self._lock:
-            clients = list(self._clients)
-        for channel in clients:
+            subscriptions = list(self._subscriptions)
+        for subscription in subscriptions:
             try:
-                channel.put_nowait(event)
+                subscription.events.put_nowait(event)
             except queue.Full:
-                pass
+                subscription.missed.set()
 
 
 BROKER = Broker()

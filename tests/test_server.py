@@ -196,6 +196,15 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual(broker.online_user_ids(), frozenset())
         self.assertEqual(broker.unsubscribe(second), (None, False))
 
+    def test_a_stream_that_falls_behind_is_flagged_rather_than_losing_events(self):
+        broker = realtime.Broker()
+        subscription, _ = broker.subscribe(1)
+        for index in range(60):
+            broker.publish({"type": "message.created", "channel_id": 1, "id": index})
+        self.assertTrue(subscription.missed.is_set(),
+                        "an overflowing stream must be told to re-read, not left silently wrong")
+        self.assertEqual(subscription.events.qsize(), 50)
+
     def test_presence_is_only_visible_across_a_shared_community(self):
         with database.connect() as db:
             actors = {}

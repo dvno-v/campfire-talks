@@ -177,6 +177,14 @@ Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
 | `presence.offline` | `user_id`, sent when its last stream closes |
 | `member.joined` | `community_id` and the new `member` object |
 | `channel.created` | `community_id`, `id`, and `name` |
+| `stream.reset` | nothing; the client must re-read the channel it is viewing |
+
+Each stream buffers 50 events. A client that falls further behind than that
+receives `stream.reset` instead of losing events quietly, because a transcript
+that is wrong without saying so is worse than one that reloads. Clients should
+also re-read after any reconnect: `EventSource` reconnects on its own, and
+anything published during the gap was never delivered. Re-reading rather than
+fetching `?after=` is deliberate — a gap can hide edits and deletions too.
 
 Authorization is re-checked per event, because membership can change while a
 stream is open:

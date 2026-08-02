@@ -642,7 +642,7 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        channel, became_online = BROKER.subscribe(user["id"])
+        subscription, became_online = BROKER.subscribe(user["id"])
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -654,17 +654,21 @@ class App(BaseHTTPRequestHandler):
         try:
             while True:
                 try:
-                    event = channel.get(timeout=DISCONNECT_POLL_SECONDS)
+                    event = subscription.events.get(timeout=DISCONNECT_POLL_SECONDS)
                 except queue.Empty:
                     # Watch for a closed peer here rather than waiting for a write to
                     # fail, so someone leaving shows as offline in seconds.
                     if self.client_disconnected():
                         break
+                    if self.report_missed_events(subscription):
+                        last_keepalive = time.time()
+                        continue
                     if time.time() - last_keepalive >= KEEPALIVE_SECONDS:
                         last_keepalive = time.time()
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                     continue
+                self.report_missed_events(subscription)
                 if not self.event_visible_to(event, user):
                     continue
                 self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -673,9 +677,18 @@ class App(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
-            _, went_offline = BROKER.unsubscribe(channel)
+            _, went_offline = BROKER.unsubscribe(subscription)
             if went_offline:
                 BROKER.publish({"type": "presence.offline", "user_id": user["id"]})
+
+    def report_missed_events(self, subscription):
+        """Tell a stream that fell behind to re-read, rather than losing events silently."""
+        if not subscription.missed.is_set():
+            return False
+        subscription.missed.clear()
+        self.wfile.write(b'data: {"type": "stream.reset"}\n\n')
+        self.wfile.flush()
+        return True
 
     def client_disconnected(self):
         """True once the peer has closed its end of an idle stream."""

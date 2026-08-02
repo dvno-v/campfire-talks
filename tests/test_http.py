@@ -23,7 +23,7 @@ temporary = tempfile.TemporaryDirectory()
 os.environ.setdefault("CAMPFIRE_DB", str(Path(temporary.name) / "http.db"))
 os.environ.setdefault("CAMPFIRE_UPLOAD_DIR", str(Path(temporary.name) / "uploads"))
 
-from campfire import database, security
+from campfire import database, realtime, security
 from campfire.http import App
 
 PASSWORD = "a sufficiently long password"
@@ -284,6 +284,17 @@ class HTTPTests(unittest.TestCase):
                          cookie=self.owner_session)
             leaked = self.await_event(stream, lambda e: e.get("type") == "channel.created", timeout=1.5)
         self.assertIsNone(leaked, "a non-member must not learn about another community's channels")
+
+    def test_a_client_that_fell_behind_is_told_to_re_read(self):
+        viewer = self.signed_in_user("resync_viewer")
+        with self.event_stream(viewer) as stream:
+            time.sleep(0.3)
+            # Reaching into the broker makes the overflow deterministic; provoking
+            # it by flooding would race the consumer draining the queue.
+            for subscription in list(realtime.BROKER._subscriptions):
+                subscription.missed.set()
+            event = self.await_event(stream, lambda e: e.get("type") == "stream.reset", timeout=8)
+        self.assertIsNotNone(event, "a stream that dropped events never told the client")
 
     def test_the_member_list_reports_an_open_stream_as_online(self):
         viewer = self.signed_in_user("presence_viewer")
