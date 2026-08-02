@@ -1,0 +1,32 @@
+.message-body:empty {
+  display: none;
+}
+
+.message-attachment {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-top: 9px;
+  text-decoration: none;
+  width: min(520px, 100%);
+}
+
+.message-attachment img {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: block;
+  max-height: 380px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.message-attachment span {
+  display: block;
+  margin-top: 5px;
+}
+
+#upload-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}

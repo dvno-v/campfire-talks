@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#17181c"><title>Campfire</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/attachments.css">
+  <link rel="stylesheet" href="/layout.css">
+</head>
+<body>
+  <main id="auth" class="auth-shell">
+    <section class="auth-card">
+      <div class="brand-mark">C</div><p class="eyebrow">CAMPFIRE</p>
+      <h1>Your people, one cozy corner.</h1>
+      <p class="muted">An open community chat built for conversation, not engagement metrics.</p>
+      <form id="auth-form">
+        <label>Username<input id="username" autocomplete="username" minlength="2" maxlength="24" required></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" minlength="12" maxlength="1024" required></label>
+        <label id="invite-label" class="hidden">Invite code<input id="invite" autocomplete="off" maxlength="64"></label>
+        <p id="auth-error" class="error"></p>
+        <button id="auth-submit" class="primary" type="submit">Sign in</button>
+      </form>
+      <button id="auth-toggle" class="text-button">New here? Create an account</button>
+    </section>
+  </main>
+
+  <main id="app" class="app hidden">
+    <aside class="rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
+    <aside class="sidebar">
+      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="invite-friend" title="Create invite">⌁</button><button id="add-channel" title="Add channel">+</button></div></header>
+      <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
+      <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
+    </aside>
+    <section class="chat">
+      <header class="chat-header"><b>#</b><strong id="channel-name">general</strong><span>A place to talk</span></header>
+      <div id="messages" class="messages"><div class="empty"><div>#</div><h2>Welcome</h2><p>This is the beginning of the channel.</p></div></div>
+      <form id="message-form" class="composer"><button id="upload-button" type="button" title="Share an image">+</button><input id="file-input" class="hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><textarea id="message" rows="1" maxlength="4000" placeholder="Message #general"></textarea><span>↵</span></form>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,69 @@
+# Campfire security model
+
+This document describes implemented controls, known gaps, and the intended
+threat model. “Self-hosted” does not automatically mean “secure.”
+
+## Intended threat model
+
+Campfire currently aims to protect a small, invite-only group against automated
+login attacks, cross-site browser attacks, accidental public registration, and
+passive interception when deployed behind HTTPS.
+
+It does **not** currently protect message contents from the server operator or
+an attacker who obtains the database. Text messages are not end-to-end
+encrypted. A compromised host, browser, or administrator can read them.
+
+## Implemented controls
+
+- Passwords use PBKDF2-HMAC-SHA256 with a random 128-bit salt and 600,000
+  iterations. Existing hashes from the first prototype are upgraded on login.
+- After the initial owner account, registration requires a random, expiring
+  invite. Only a SHA-256 digest of each invite is stored.
+- Authentication attempts are limited in memory to eight per client and
+  operation scope per five-minute window. Addresses are not persisted.
+- Sessions use 256-bit random tokens, 30-day expiry, `HttpOnly`, and
+  `SameSite=Strict`. Set `CAMPFIRE_SECURE_COOKIES=1` in HTTPS deployments.
+- State-changing browser requests reject cross-site fetches and mismatched
+  `Origin` headers.
+- Responses apply a same-origin Content Security Policy, deny framing and MIME
+  sniffing, disable indexing, and restrict camera, microphone, and display
+  capture to the application origin.
+- Every channel read, write, and live event verifies community membership.
+- Image uploads use a narrow format allowlist, an 8 MiB size limit, magic-byte
+  validation, random non-user-controlled storage names, and private authorized
+  retrieval. SVG and arbitrary documents are rejected.
+- Access logging is disabled unless the operator explicitly enables it.
+
+The password parameters follow OWASP's PBKDF2-HMAC-SHA256 guidance. Python's
+standard library also recommends salted, tunably slow password derivation:
+
+- [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
+- [Python `hashlib` key derivation documentation](https://docs.python.org/3/library/hashlib.html#key-derivation)
+- [OWASP CSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)
+- [OWASP HTTP Security Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
+- [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
+
+## Known gaps before public exposure
+
+- The standard-library HTTP server has not undergone production hardening or an
+  independent security audit.
+- There is no multi-factor authentication, password reset, session management
+  screen, account deletion, invite revocation UI, or moderator role model.
+- Messages are not end-to-end encrypted and are retained indefinitely.
+- Voice and screen sharing are not implemented yet.
+- Image decoding/re-encoding, EXIF removal, malware scanning, and storage quotas
+  are not implemented yet. Signature checks are useful defense in depth, not
+  proof that an image is harmless.
+- The in-memory limiter resets on restart and is not shared across processes.
+- SQLite backups are not automatically encrypted.
+- Dependency/container scanning and a disclosure process are not yet automated.
+
+For a few trusted friends behind a VPN or private overlay network, these gaps
+are manageable if everyone understands them. For an internet-facing service,
+address them and obtain a security review first.
+
+## Reporting a vulnerability
+
+Until a private reporting address is configured, do not publish a working
+exploit or sensitive instance data in a public issue. Contact the instance
+operator directly and agree on a disclosure path.

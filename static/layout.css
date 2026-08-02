@@ -1,0 +1,31 @@
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+.app,
+.chat,
+.messages,
+.sidebar,
+.sidebar nav {
+  min-height: 0;
+}
+
+.messages,
+.sidebar nav {
+  overscroll-behavior: contain;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.message-row > div:last-child {
+  min-width: 0;
+}
+
+@media (max-width: 700px) {
+  .app,
+  .chat {
+    height: 100dvh;
+  }
+}
