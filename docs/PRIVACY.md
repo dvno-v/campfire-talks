@@ -31,6 +31,30 @@ older backups can contain the replaced rows until those backups are rotated.
 For sessions created before this field existed, the first upgraded release uses
 its startup time as the creation time because no earlier timestamp was stored.
 
+An account can download everything Campfire stores about it as a single JSON
+file: the account row without its password hash, when each session began and
+expires without its digest, memberships and roles, every message it wrote,
+image metadata, read markers, notification preferences, invites it created, and
+bans it received. The file is plain text and depends on nothing Campfire hosts,
+so leaving does not mean losing your own history. It contains no one else's
+messages and nothing the account could not already see in the interface.
+
+Deleting an account erases the account row, its sessions, memberships, read
+markers, notification preferences, and the invites it created, along with every
+message it wrote and every image it uploaded — in all communities, including
+any that had removed it. Stored image files are unlinked from disk, not merely
+dereferenced. This is deliberately stronger than a kick: a kick is a moderator
+acting on somebody, so their words stay part of everyone else's conversation,
+while deletion is the account itself withdrawing and taking what it published
+with it. A community the account owned passes to its most privileged remaining
+member; a community with no other member is deleted with its channels,
+messages, and images. Bans the account issued as a moderator survive, with the
+moderator link cleared to NULL, because the banned account's protection should
+not depend on who is still around. Backups taken before a deletion still hold
+the content until they are rotated. Deletion cannot be undone, and if the last
+account on an instance deletes itself, the next registration becomes the first
+account again and needs no invite.
+
 Members of the same community can see one another's username, internal user ID,
 and community role. Non-owner roles are stored on the membership; the owner
 role is derived from the community's existing owner link. A role change

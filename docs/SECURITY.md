@@ -37,6 +37,14 @@ encrypted. A compromised host, browser, or administrator can read them.
   scope, replace the stored hash, and revoke every session except the caller's.
   Live streams re-check their opening session every two seconds, so remote
   revocation also terminates an already connected browser.
+- Account deletion requires the current password, uses its own rate-limit
+  scope, and is authorized only for the caller's own account: there is no
+  endpoint by which one account can delete another. Ownership of a community is
+  reassigned before the account row is removed, so a deletion cannot leave a
+  community pointing at a user that no longer exists.
+- The account export is an authenticated read of the caller's own data only.
+  It contains no password hash, session token digest, or invite digest, so a
+  leaked export cannot be replayed as a credential.
 - Usernames are unique without regard to capitalization. Sign-in resolves them
   case-insensitively, so allowing `Sam` and `sam` to coexist would let one
   account answer for the other. Startup fails closed if an older database

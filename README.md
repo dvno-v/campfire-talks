@@ -7,6 +7,8 @@ and the browser receives live messages over Server-Sent Events.
 ## Included in the MVP
 
 - Account registration, login, password changes, and remotely revocable sessions
+- Self-service data export and account deletion, with owned communities passed
+  on rather than orphaned
 - Invite-only registration after the first account
 - Administrator-controlled active invite management and immediate revocation
 - Communities and text channels
@@ -49,7 +51,7 @@ python3 -m unittest discover -s tests -v
 ## Near-term roadmap
 
 1. Channel permissions, slow mode, and upload controls
-2. Per-community retention settings, account deletion, and data export
+2. Per-community retention settings and storage quota reporting
 3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
 4. Voice rooms through a dedicated WebRTC SFU
 

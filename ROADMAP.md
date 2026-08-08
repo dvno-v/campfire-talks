@@ -42,7 +42,8 @@ Status: in progress
 - [ ] Channel permissions, slow mode, and upload controls
 - [x] Account password change, active-session list, and remote session revocation
 - [ ] Per-community message and attachment retention settings
-- [ ] User account deletion and operator-assisted data export
+- [x] User account deletion and self-service data export *(export is
+      self-service rather than operator-assisted; no operator step is needed)*
 - [x] Attachment deletion when its message is removed *(delivered with message
   deletion in Milestone 1)*
 - [ ] Storage quota and visible disk-usage reporting

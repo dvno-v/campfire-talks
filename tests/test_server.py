@@ -12,7 +12,8 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, realtime, security, uploads
-from campfire.services.accounts import change_password, list_sessions, revoke_session
+from campfire.services.accounts import change_password, delete_account, deletion_plan
+from campfire.services.accounts import export_account, list_sessions, revoke_session
 from campfire.services.communities import community_role, has_role, is_banned, list_active_invites
 from campfire.services.communities import list_community_bans, list_community_members, remove_member
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
@@ -146,6 +147,139 @@ class CampfireTests(unittest.TestCase):
             self.assertEqual([entry["id"] for entry in
                               list_sessions(db, user_id, current, timestamp=1000)],
                              [sessions[0]["id"]])
+
+    def account_fixture(self, db, label, password="a sufficiently long password"):
+        """Build an account that owns one community and has written in another."""
+        actors = {}
+        for role in ("subject", "administrator", "member", "host"):
+            actors[role] = db.execute(
+                "INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                (f"{label}_{role}", security.password_hash(password) if role == "subject" else "unused",
+                 database.utc_now())).lastrowid
+        owned = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                           (f"{label} owned", actors["subject"], database.utc_now())).lastrowid
+        guest = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                           (f"{label} guest", actors["host"], database.utc_now())).lastrowid
+        for community_id, user_id, role in ((owned, actors["subject"], "member"),
+                                            (owned, actors["member"], "member"),
+                                            (owned, actors["administrator"], "administrator"),
+                                            (guest, actors["host"], "member"),
+                                            (guest, actors["subject"], "member")):
+            db.execute("INSERT INTO memberships(community_id,user_id,role) VALUES(?,?,?)",
+                       (community_id, user_id, role))
+        channels = {}
+        for name, community_id in (("owned", owned), ("guest", guest)):
+            channels[name] = db.execute(
+                "INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                (community_id, "general", database.utc_now())).lastrowid
+        attachment_id = db.execute("""INSERT INTO attachments
+          (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+          VALUES(?,?,?,?,?,?,?)""",
+          (channels["guest"], actors["subject"], f"{label}_stored.png", "photo.png",
+           "image/png", 12, database.utc_now())).lastrowid
+        db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                   (channels["owned"], actors["subject"], "mine", database.utc_now()))
+        db.execute("""INSERT INTO messages(channel_id,author_id,body,created_at,attachment_id)
+                      VALUES(?,?,?,?,?)""",
+                   (channels["guest"], actors["subject"], "shared", database.utc_now(), attachment_id))
+        db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                   (channels["guest"], actors["host"], "theirs", database.utc_now()))
+        return actors | {"owned": owned, "guest": guest} | {f"{k}_channel": v for k, v in channels.items()}
+
+    def test_export_gathers_only_the_account_it_belongs_to(self):
+        with database.connect() as db:
+            actors = self.account_fixture(db, "export")
+            export = export_account(db, actors["subject"], exported_at="2026-08-09T00:00:00Z")
+        self.assertEqual(export["format"], "campfire.account-export.v1")
+        self.assertEqual(export["account"]["username"], "export_subject")
+        self.assertNotIn("password_hash", export["account"])
+        self.assertEqual({entry["body"] for entry in export["messages"]}, {"mine", "shared"},
+                         "an export must not carry other people's messages")
+        self.assertEqual([entry["role"] for entry in export["communities"]
+                          if entry["name"] == "export owned"], ["owner"])
+        self.assertEqual([entry["attachment_name"] for entry in export["messages"]
+                          if entry["body"] == "shared"], ["photo.png"])
+        self.assertEqual(export["notification_preferences"]["default_mode"], "all")
+
+    def test_deletion_hands_an_owned_community_to_its_senior_member(self):
+        with database.connect() as db:
+            actors = self.account_fixture(db, "succession")
+            plan = deletion_plan(db, actors["subject"])
+            self.assertEqual(plan["communities_dissolved"], [])
+            self.assertEqual([entry["successor_username"] for entry in plan["communities_transferred"]],
+                             ["succession_administrator"],
+                             "the most privileged remaining member inherits, not the first row")
+            self.assertEqual(plan["messages"], 2)
+            self.assertEqual(plan["attachments"], 1)
+
+            status, outcome = delete_account(db, actors["subject"], "a sufficiently long password")
+            self.assertEqual(status, "ok")
+            self.assertEqual(outcome["orphaned_files"], ["succession_stored.png"])
+            self.assertEqual(db.execute("SELECT owner_id FROM communities WHERE id=?",
+                                        (actors["owned"],)).fetchone()[0], actors["administrator"])
+            self.assertIsNone(db.execute("SELECT 1 FROM users WHERE id=?",
+                                         (actors["subject"],)).fetchone())
+            self.assertEqual([row[0] for row in db.execute(
+                "SELECT body FROM messages WHERE channel_id IN (?,?) ORDER BY id",
+                (actors["owned_channel"], actors["guest_channel"]))],
+                ["theirs"], "the account's messages go with it, others' stay")
+            self.assertIsNone(db.execute("SELECT 1 FROM attachments WHERE storage_name=?",
+                                         ("succession_stored.png",)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE user_id=?",
+                                         (actors["subject"],)).fetchone())
+
+    def test_deletion_dissolves_a_community_nobody_else_belongs_to(self):
+        with database.connect() as db:
+            actors = self.account_fixture(db, "dissolve")
+            db.execute("DELETE FROM memberships WHERE community_id=? AND user_id<>?",
+                       (actors["owned"], actors["subject"]))
+            plan = deletion_plan(db, actors["subject"])
+            self.assertEqual([entry["name"] for entry in plan["communities_dissolved"]],
+                             ["dissolve owned"])
+            self.assertEqual(plan["communities_transferred"], [])
+
+            self.assertEqual(delete_account(db, actors["subject"], "a sufficiently long password")[0], "ok")
+            self.assertIsNone(db.execute("SELECT 1 FROM communities WHERE id=?",
+                                         (actors["owned"],)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM channels WHERE id=?",
+                                         (actors["owned_channel"],)).fetchone())
+            self.assertTrue(db.execute("SELECT 1 FROM communities WHERE id=?",
+                                       (actors["guest"],)).fetchone(),
+                            "a community the account merely joined must survive")
+
+    def test_deletion_erases_messages_left_in_a_community_that_removed_the_account(self):
+        """Being kicked leaves your words behind; deleting your account does not."""
+        with database.connect() as db:
+            actors = self.account_fixture(db, "kicked_then_deleted")
+            db.execute("DELETE FROM memberships WHERE community_id=? AND user_id=?",
+                       (actors["guest"], actors["subject"]))
+            self.assertEqual(delete_account(db, actors["subject"], "a sufficiently long password")[0], "ok")
+            self.assertEqual([row[0] for row in db.execute(
+                "SELECT body FROM messages WHERE channel_id=?", (actors["guest_channel"],))], ["theirs"])
+
+    def test_deletion_refuses_the_wrong_password_and_changes_nothing(self):
+        with database.connect() as db:
+            actors = self.account_fixture(db, "wrong_password")
+            status, outcome = delete_account(db, actors["subject"], "not the right password")
+            self.assertEqual(status, "invalid_password")
+            self.assertIsNone(outcome)
+            self.assertTrue(db.execute("SELECT 1 FROM users WHERE id=?", (actors["subject"],)).fetchone())
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages WHERE author_id=?",
+                                        (actors["subject"],)).fetchone()[0], 2)
+
+    def test_deletion_keeps_bans_the_account_issued_without_naming_it(self):
+        with database.connect() as db:
+            actors = self.account_fixture(db, "issued_bans")
+            db.execute("""INSERT INTO community_bans
+              (community_id,user_id,banned_by,role_at_ban,created_at) VALUES(?,?,?,?,?)""",
+              (actors["owned"], actors["member"], actors["subject"], "member", database.utc_now()))
+            db.execute("DELETE FROM memberships WHERE community_id=? AND user_id=?",
+                       (actors["owned"], actors["member"]))
+            self.assertEqual(delete_account(db, actors["subject"], "a sufficiently long password")[0], "ok")
+            ban = db.execute("SELECT user_id,banned_by FROM community_bans WHERE community_id=?",
+                             (actors["owned"],)).fetchone()
+        self.assertEqual(ban["user_id"], actors["member"], "the ban must outlive the moderator's account")
+        self.assertIsNone(ban["banned_by"])
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

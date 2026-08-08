@@ -660,6 +660,83 @@ class HTTPTests(unittest.TestCase):
         _, payload, _ = self.request("GET", "/api/me", cookie=current)
         self.assertIsNone(payload["user"])
 
+    def download(self, path, cookie):
+        """Like `request`, but keeps the headers a download depends on."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request("GET", path, headers={"Cookie": f"campfire_session={cookie}"})
+        response = connection.getresponse()
+        payload = json.loads(response.read() or b"null")
+        disposition = response.getheader("Content-Disposition")
+        connection.close()
+        return response.status, payload, disposition
+
+    def test_account_export_is_private_and_offered_as_a_download(self):
+        token = self.signed_in_user("exporting_user")
+        user_id = self.user_id_for("exporting_user")
+        with database.connect() as db:
+            db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                       (self.channel_id, user_id, "something I wrote", database.utc_now()))
+            db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                       (self.channel_id, self.owner_id, "something they wrote", database.utc_now()))
+
+        status, payload, _ = self.request("GET", "/api/account/export")
+        self.assertEqual(status, 401, "an export must never be readable without a session")
+
+        status, export, disposition = self.download("/api/account/export", token)
+        self.assertEqual(status, 200)
+        self.assertEqual(disposition, 'attachment; filename="campfire-exporting_user-'
+                                      f'{export["exported_at"][:10]}.json"')
+        self.assertEqual([entry["body"] for entry in export["messages"]], ["something I wrote"])
+        self.assertNotIn("password_hash", export["account"])
+        self.assertTrue(all("token" not in session for session in export["sessions"]))
+
+    def test_account_deletion_needs_the_password_and_erases_what_the_account_wrote(self):
+        status, _, cookie = self.request("POST", "/api/register", {
+            "username": "departing_user", "password": PASSWORD, "invite": self.invite_token()})
+        self.assertEqual(status, 201)
+        user_id = self.user_id_for("departing_user")
+        config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        stored = config.UPLOAD_DIR / "departing_user_stored.png"
+        stored.write_bytes(b"pretend image")
+        with database.connect() as db:
+            attachment_id = db.execute("""INSERT INTO attachments
+              (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (self.channel_id, user_id, stored.name, "photo.png", "image/png", 13,
+               database.utc_now())).lastrowid
+            message_id = db.execute("""INSERT INTO messages
+              (channel_id,author_id,body,created_at,attachment_id) VALUES(?,?,?,?,?)""",
+              (self.channel_id, user_id, "goodbye", database.utc_now(), attachment_id)).lastrowid
+
+        status, payload, _ = self.request("GET", "/api/account/deletion", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["messages"], 1)
+        self.assertEqual(payload["attachments"], 1)
+
+        status, payload, _ = self.request("DELETE", "/api/account",
+                                          {"current_password": "not the password"}, cookie=cookie)
+        self.assertEqual(status, 403)
+        self.assertTrue(stored.exists(), "a refused deletion must not touch stored files")
+
+        with self.event_stream(self.owner_session) as stream:
+            time.sleep(0.3)
+            status, payload, cleared_cookie = self.request(
+                "DELETE", "/api/account", {"current_password": PASSWORD}, cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(cleared_cookie, "")
+            removal = self.await_event(stream, lambda event: event["type"] == "member.removed")
+        self.assertEqual(removal["user_id"], user_id)
+        self.assertIs(removal["deleted_account"], True,
+                      "remaining members need to know history changed, not just the member list")
+
+        _, payload, _ = self.request("GET", "/api/me", cookie=cookie)
+        self.assertIsNone(payload["user"])
+        self.assertFalse(stored.exists(), "a deleted account's images must leave the disk")
+        with database.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE user_id=?", (user_id,)).fetchone())
+
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)

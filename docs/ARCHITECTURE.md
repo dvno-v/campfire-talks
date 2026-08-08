@@ -58,7 +58,8 @@ separate self-hosted SFU.
 `campfire/http.py` intentionally remains the composition point. Community
 membership and roles, message ownership, per-account reading state, and account
 security are extracted domain services. `services/accounts.py` owns password
-replacement and session listing/revocation; `services/communities.py` resolves
+replacement, session listing/revocation, and the export and deletion of a whole
+account; `services/communities.py` resolves
 the privilege ladder and owns membership removal and ban workflows,
 `services/messages.py` decides who may edit or delete, and
 `services/notifications.py` decides what each account has read and wants told.

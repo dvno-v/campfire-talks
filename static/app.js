@@ -16,7 +16,7 @@ function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (cha
 function showAuth() {
   state.eventSource?.close(); state.eventSource = null; state.user = null;
   if ($('#account-dialog').open) $('#account-dialog').close();
-  $('#password-form').reset();
+  $('#password-form').reset(); $('#delete-account-form').reset();
   $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden');
 }
 
@@ -269,7 +269,10 @@ function applyMemberRemoved(event) {
   if (event.community_id !== state.community?.id) return;
   state.members = state.members.filter(member => member.id !== Number(event.user_id));
   state.online.delete(Number(event.user_id));
-  renderMembers(); refreshMessages();
+  renderMembers();
+  // A deleted account takes its messages with it, so the open channel is stale
+  // in a way re-rendering the badges cannot fix.
+  if (event.deleted_account) { resyncChannel(); refreshUnread(); } else refreshMessages();
   if (event.banned && $('#ban-dialog').open) loadBans();
 }
 
@@ -404,8 +407,8 @@ $('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-wid
 $('#close-members').onclick = () => { $('#members-panel').classList.remove('open'); $('#toggle-members').setAttribute('aria-expanded','false'); };
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
-$('#account-settings').onclick = async () => { $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; await loadSessions(); };
-$('#close-account').onclick = () => { $('#password-form').reset(); $('#account-dialog').close(); };
+$('#account-settings').onclick = async () => { $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadDeletionPlan()]); };
+$('#close-account').onclick = () => { $('#password-form').reset(); $('#delete-account-form').reset(); $('#account-dialog').close(); };
 $('#password-form').onsubmit = async event => {
   event.preventDefault();
   const status=$('#password-status'), current=$('#current-password').value, next=$('#new-password').value;
@@ -430,6 +433,29 @@ async function revokeSession(sessionId) {
   if(!confirm('Sign out that session? Its live connection will close within a couple of seconds.'))return;
   try{await api(`/api/sessions/${sessionId}`,{method:'DELETE'});await loadSessions();}catch(error){alert(error.message);}
 }
+// Ownership moving to someone else, or a community disappearing entirely, are
+// consequences worth reading before the password box, not after the deletion.
+async function loadDeletionPlan() {
+  const summary=$('#deletion-plan'); summary.classList.remove('error'); summary.textContent='Checking what deletion would affect…';
+  try {
+    const plan=await api('/api/account/deletion');
+    const lines=[`${Number(plan.messages)} message${Number(plan.messages)===1?'':'s'} and ${Number(plan.attachments)} image${Number(plan.attachments)===1?'':'s'} will be erased.`];
+    plan.communities_transferred.forEach(community=>lines.push(`${community.name} passes to ${community.successor_username}.`));
+    plan.communities_dissolved.forEach(community=>lines.push(`${community.name} has no other members and will be deleted with all of its channels and messages.`));
+    summary.textContent=lines.join(' ');
+  } catch(error){summary.classList.add('error');summary.textContent=error.message;}
+}
+$('#delete-account-form').onsubmit = async event => {
+  event.preventDefault();
+  const status=$('#delete-status'); status.classList.remove('error'); status.textContent='';
+  if(!confirm('Delete your account permanently? Your messages and images go with it, and this cannot be undone.'))return;
+  const button=event.currentTarget.querySelector('button[type="submit"]'); button.disabled=true;
+  try {
+    await api('/api/account',{method:'DELETE',body:JSON.stringify({current_password:$('#delete-password').value})});
+    event.currentTarget.reset(); showAuth();
+  } catch(error){status.classList.add('error');status.textContent=error.message;}
+  finally{button.disabled=false;}
+};
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
 $('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
 $('#invite-friend').onclick = async () => { if(!state.community)return; $('#invite-dialog').showModal(); await loadInvites(); };

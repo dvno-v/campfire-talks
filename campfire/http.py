@@ -29,6 +29,7 @@ from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAM
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
 from .services.accounts import change_password as change_account_password
+from .services.accounts import delete_account, deletion_plan, export_account
 from .services.accounts import list_sessions, revoke_session as revoke_account_session
 from .services.communities import ASSIGNABLE_ROLES, community_role, has_role, is_banned, is_member
 from .services.communities import list_active_invites, list_community_bans, list_community_members
@@ -172,6 +173,10 @@ class App(BaseHTTPRequestHandler):
             return self.unread_state()
         if path == "/api/sessions":
             return self.active_sessions()
+        if path == "/api/account/export":
+            return self.export_account_data()
+        if path == "/api/account/deletion":
+            return self.account_deletion_plan()
         if path == "/api/events":
             return self.events()
         if path.startswith("/api/communities/") and path.endswith("/members"):
@@ -223,6 +228,8 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.FORBIDDEN, "Cross-origin request blocked")
         path = urlparse(self.path).path
         try:
+            if path == "/api/account":
+                return self.delete_own_account()
             if path.startswith("/api/invites/"):
                 return self.revoke_invite(path)
             if path.startswith("/api/messages/"):
@@ -393,6 +400,60 @@ class App(BaseHTTPRequestHandler):
     def expired_session_cookie(self):
         secure = "; Secure" if SECURE_COOKIES else ""
         return f"campfire_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"
+
+    def export_account_data(self):
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as database:
+            export = export_account(database, user["id"])
+        if export is None:
+            return self.error(HTTPStatus.NOT_FOUND, "Account not found")
+        # Usernames are already restricted to letters, digits and underscores,
+        # so the filename cannot carry quotes or path separators into the header.
+        filename = f"campfire-{user['username']}-{export['exported_at'][:10]}.json"
+        self.send_json(export, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    def account_deletion_plan(self):
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as database:
+            plan = deletion_plan(database, user["id"])
+        self.send_json(plan)
+
+    def delete_own_account(self):
+        user = self.require_user()
+        if not user:
+            return
+        password = str(self.json_body().get("current_password", ""))
+        if len(password) > 1024:
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid current password")
+        if not self.rate_limit_auth(f"delete:{user['id']}"):
+            return
+        with connect() as database:
+            # Read the memberships before they are gone: the clients that must
+            # be told cannot be identified from a deleted account.
+            communities = [row["community_id"] for row in database.execute(
+                "SELECT community_id FROM memberships WHERE user_id=?", (user["id"],)).fetchall()]
+            status, plan = delete_account(database, user["id"], password)
+        if status == "invalid_password":
+            return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+        if status != "ok":
+            return self.error(HTTPStatus.NOT_FOUND, "Account not found")
+        for orphaned_file in plan["orphaned_files"]:
+            (UPLOAD_DIR / orphaned_file).unlink(missing_ok=True)
+        AUTH_LIMITER.clear(self.auth_limit_key(f"delete:{user['id']}"))
+        for community_id in communities:
+            # `deleted_account` tells the remaining members that history changed
+            # underneath them, not merely the member list.
+            BROKER.publish({"type": "member.removed", "community_id": community_id,
+                            "user_id": user["id"], "banned": False, "deleted_account": True})
+        self.send_json({"ok": True, "messages": plan["messages"],
+                        "attachments": plan["attachments"],
+                        "communities_dissolved": plan["communities_dissolved"],
+                        "communities_transferred": plan["communities_transferred"]},
+                       headers={"Set-Cookie": self.expired_session_cookie()})
 
     def bootstrap(self):
         user = self.require_user()

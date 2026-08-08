@@ -73,3 +73,84 @@
   color: #6dd6a9 !important;
   font-weight: 700;
 }
+
+.export-button {
+  background: #292a31;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  margin-top: 12px;
+  padding: 11px 13px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.export-button:hover {
+  border-color: var(--accent);
+}
+
+.danger-zone {
+  border: 1px solid #4a2a28;
+  border-radius: 12px;
+  margin-top: 26px;
+  padding: 16px;
+}
+
+.danger-zone h3 {
+  color: var(--danger);
+  margin: 0 0 6px;
+}
+
+.danger-zone p.muted {
+  font-size: 13px;
+  margin: 0;
+}
+
+.danger-zone form {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.danger-zone label {
+  color: #c8c7ce;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.danger-zone input {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  display: block;
+  margin-top: 7px;
+  outline: 0;
+  padding: 11px 12px;
+  width: 100%;
+}
+
+.danger-zone input:focus {
+  border-color: var(--danger);
+}
+
+#deletion-plan {
+  margin-top: 10px;
+}
+
+.danger {
+  background: #3a1f1d;
+  border: 1px solid #6d3630;
+  border-radius: 9px;
+  color: var(--danger);
+  font-weight: 800;
+  padding: 12px;
+  width: 100%;
+}
+
+.danger:hover {
+  background: #522723;
+}

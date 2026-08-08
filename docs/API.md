@@ -64,6 +64,41 @@ another account both return `404`. Revoking the current session also expires
 its browser cookie. Revoking another session closes its live event stream in
 about two seconds; that browser returns to sign-in when it detects the loss.
 
+### `GET /api/account/export`
+
+Returns everything stored about the caller as one JSON document, served with a
+`Content-Disposition` filename so a browser saves it. It carries the account
+row without its password hash, session creation and expiry times without their
+digests, community memberships and roles, every message the caller wrote with
+its community and channel name, uploaded image metadata, read markers,
+notification preferences, invites created, and bans received. It never contains
+another account's messages or anything the caller could not already see. The
+`format` field is `campfire.account-export.v1`.
+
+### `GET /api/account/deletion`
+
+Describes what deleting the account would do, changing nothing:
+`communities_dissolved`, `communities_transferred` (each naming its successor),
+and counts of `messages` and `attachments`.
+
+### `DELETE /api/account`
+
+```json
+{"current_password": "the current passphrase"}
+```
+
+Requires the current password and is rate-limited in its own scope. Deletes the
+account, its sessions, memberships, read markers, notification preferences, and
+invites it created; erases every message it wrote and every image it uploaded,
+in all communities including any it was removed from; and removes the stored
+files from disk. Communities it owned pass to their most privileged remaining
+member — ties resolve to the oldest account — and a community with no other
+member is deleted with its channels, messages, and images. Bans it issued
+survive with the moderator link cleared. The response repeats the plan that was
+carried out, expires the browser cookie, and a `member.removed` event with
+`deleted_account: true` tells the remaining members that history changed too.
+The action cannot be undone.
+
 ### `GET /api/me`
 
 Returns `{"user": null}` when signed out or the current public user object.

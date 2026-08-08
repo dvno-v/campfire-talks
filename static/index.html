@@ -83,6 +83,18 @@
       </form>
       <div class="session-heading"><h3>Active sessions</h3><p class="muted">Campfire stores only when each session began and expires—not your device, IP address, or location.</p></div>
       <div id="session-list" class="invite-list session-list"></div>
+      <div class="session-heading"><h3>Your data</h3><p class="muted">A single JSON file holding your account, communities, messages, image details, and preferences. It is plain text and depends on nothing Campfire hosts.</p></div>
+      <a id="export-account" class="export-button" href="/api/account/export" download>Download my data</a>
+      <div class="danger-zone">
+        <h3>Delete this account</h3>
+        <p class="muted">This erases your account, every message you wrote, and every image you shared—in all communities, including any you were removed from. It cannot be undone.</p>
+        <p id="deletion-plan" class="account-status" aria-live="polite"></p>
+        <form id="delete-account-form">
+          <label>Confirm with your password<input id="delete-password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+          <p id="delete-status" class="account-status" aria-live="polite"></p>
+          <button class="danger" type="submit">Delete my account permanently</button>
+        </form>
+      </div>
     </section>
   </dialog>
   <script src="/app.js"></script>
