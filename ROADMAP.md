@@ -40,7 +40,7 @@ Status: in progress
 - [x] Roles: owner, administrator, moderator, member
 - [x] Kick/ban with role hierarchy and invite re-entry prevention
 - [ ] Channel permissions, slow mode, and upload controls
-- [ ] Account password change, active-session list, and remote session revocation
+- [x] Account password change, active-session list, and remote session revocation
 - [ ] Per-community message and attachment retention settings
 - [ ] User account deletion and operator-assisted data export
 - [x] Attachment deletion when its message is removed *(delivered with message

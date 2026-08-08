@@ -13,7 +13,12 @@ function initials(name) { return name.slice(0, 2).toUpperCase(); }
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 // Values are interpolated into attributes as well as text, so quotes must escape too.
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (character) => HTML_ESCAPES[character]); }
-function showAuth() { $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden'); }
+function showAuth() {
+  state.eventSource?.close(); state.eventSource = null; state.user = null;
+  if ($('#account-dialog').open) $('#account-dialog').close();
+  $('#password-form').reset();
+  $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden');
+}
 
 async function enterApp() {
   const data = await api('/api/bootstrap');
@@ -36,6 +41,12 @@ async function enterApp() {
     // wrong without saying so.
     if (state.streamOpened) { resyncChannel(); refreshUnread(); }
     state.streamOpened = true;
+  };
+  // EventSource retries forever after a remote revocation. Check the ordinary
+  // auth endpoint so a revoked browser returns to sign-in instead of appearing
+  // silently frozen.
+  state.eventSource.onerror = async () => {
+    try { if (!(await api('/api/me')).user) showAuth(); } catch { /* a transient outage should keep retrying */ }
   };
   state.eventSource.onmessage = ({ data }) => {
     const event = JSON.parse(data);
@@ -393,6 +404,32 @@ $('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-wid
 $('#close-members').onclick = () => { $('#members-panel').classList.remove('open'); $('#toggle-members').setAttribute('aria-expanded','false'); };
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
+$('#account-settings').onclick = async () => { $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; await loadSessions(); };
+$('#close-account').onclick = () => { $('#password-form').reset(); $('#account-dialog').close(); };
+$('#password-form').onsubmit = async event => {
+  event.preventDefault();
+  const status=$('#password-status'), current=$('#current-password').value, next=$('#new-password').value;
+  status.classList.remove('error'); status.textContent='';
+  if(next!==$('#confirm-password').value){status.classList.add('error');status.textContent='The new passwords do not match.';return;}
+  const button=event.currentTarget.querySelector('button[type="submit"]'); button.disabled=true;
+  try {
+    const data=await api('/api/account/password',{method:'PATCH',body:JSON.stringify({current_password:current,new_password:next})});
+    event.currentTarget.reset(); status.textContent=`Password changed. ${Number(data.revoked_sessions)} other session${Number(data.revoked_sessions)===1?' was':'s were'} signed out.`; await loadSessions();
+  } catch(error){status.classList.add('error');status.textContent=error.message;}
+  finally{button.disabled=false;}
+};
+async function loadSessions() {
+  const list=$('#session-list'); list.innerHTML='<p class="member-empty">Loading sessions…</p>';
+  try {
+    const data=await api('/api/sessions');
+    list.innerHTML=data.sessions.length?data.sessions.map(session=>`<article class="invite-row"><div><strong>Session #${Number(session.id)}</strong><span${session.current?' class="session-current"':''}>${session.current?'This session':'Another signed-in session'}</span><span>Started ${new Date(session.created_at).toLocaleString()}</span><span>Expires ${new Date(Number(session.expires_at)*1000).toLocaleString()}</span></div>${session.current?'':`<button type="button" data-revoke-session="${Number(session.id)}">Sign out</button>`}</article>`).join(''):'<p class="member-empty">No active sessions.</p>';
+    document.querySelectorAll('[data-revoke-session]').forEach(button=>button.onclick=()=>revokeSession(Number(button.dataset.revokeSession)));
+  } catch(error){list.innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`;}
+}
+async function revokeSession(sessionId) {
+  if(!confirm('Sign out that session? Its live connection will close within a couple of seconds.'))return;
+  try{await api(`/api/sessions/${sessionId}`,{method:'DELETE'});await loadSessions();}catch(error){alert(error.message);}
+}
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
 $('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
 $('#invite-friend').onclick = async () => { if(!state.community)return; $('#invite-dialog').showModal(); await loadInvites(); };

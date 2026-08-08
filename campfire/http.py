@@ -28,6 +28,8 @@ from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
+from .services.accounts import change_password as change_account_password
+from .services.accounts import list_sessions, revoke_session as revoke_account_session
 from .services.communities import ASSIGNABLE_ROLES, community_role, has_role, is_banned, is_member
 from .services.communities import list_active_invites, list_community_bans, list_community_members
 from .services.communities import remove_member as remove_community_member
@@ -114,14 +116,19 @@ class App(BaseHTTPRequestHandler):
         cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
         token = cookies.get("campfire_session")
         if not token:
+            self.authenticated_session_id = None
+            self.authenticated_session_token = None
             return None
+        token_digest = session_hash(token.value)
         with connect() as db:
             row = db.execute("""
-              SELECT users.id, users.username FROM sessions
+              SELECT users.id, users.username, sessions.rowid session_id FROM sessions
               JOIN users ON users.id = sessions.user_id
               WHERE token = ? AND expires_at > ?
-            """, (session_hash(token.value), int(time.time()))).fetchone()
-        return dict(row) if row else None
+            """, (token_digest, int(time.time()))).fetchone()
+        self.authenticated_session_id = row["session_id"] if row else None
+        self.authenticated_session_token = token_digest if row else None
+        return {"id": row["id"], "username": row["username"]} if row else None
 
     def require_user(self):
         user = self.current_user()
@@ -163,6 +170,8 @@ class App(BaseHTTPRequestHandler):
             return self.bootstrap()
         if path == "/api/unread":
             return self.unread_state()
+        if path == "/api/sessions":
+            return self.active_sessions()
         if path == "/api/events":
             return self.events()
         if path.startswith("/api/communities/") and path.endswith("/members"):
@@ -222,6 +231,8 @@ class App(BaseHTTPRequestHandler):
                 return self.unban_member(path)
             if path.startswith("/api/communities/") and "/members/" in path:
                 return self.kick_member(path)
+            if path.startswith("/api/sessions/"):
+                return self.revoke_session(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -234,6 +245,8 @@ class App(BaseHTTPRequestHandler):
         try:
             if path == "/api/preferences/notifications":
                 return self.set_notification_default()
+            if path == "/api/account/password":
+                return self.change_password()
             if path.startswith("/api/messages/"):
                 return self.edit_message(path)
             if path.startswith("/api/communities/") and "/members/" in path:
@@ -312,7 +325,8 @@ class App(BaseHTTPRequestHandler):
         token = secrets.token_urlsafe(32)
         expires = int(time.time()) + 60 * 60 * 24 * 30
         with connect() as db:
-            db.execute("INSERT INTO sessions VALUES(?,?,?)", (session_hash(token), user_id, expires))
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (session_hash(token), user_id, expires, utc_now()))
         secure = "; Secure" if SECURE_COOKIES else ""
         cookie = f"campfire_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}"
         return self.send_json({"user": {"id": user_id, "username": username}}, status, {"Set-Cookie": cookie})
@@ -325,6 +339,60 @@ class App(BaseHTTPRequestHandler):
                 db.execute("DELETE FROM sessions WHERE token = ?", (session_hash(token.value),))
         secure = "; Secure" if SECURE_COOKIES else ""
         return self.send_json({"ok": True}, headers={"Set-Cookie": f"campfire_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"})
+
+    def active_sessions(self):
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as database:
+            sessions = list_sessions(database, user["id"], self.authenticated_session_token)
+        self.send_json({"sessions": sessions})
+
+    def revoke_session(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            parts = path.split("/")
+            if len(parts) != 4:
+                raise ValueError
+            session_id = int(parts[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid session")
+        with connect() as database:
+            revoked_current = revoke_account_session(
+                database, user["id"], session_id, self.authenticated_session_token)
+        if revoked_current is None:
+            return self.error(HTTPStatus.NOT_FOUND, "Session not found")
+        headers = {"Set-Cookie": self.expired_session_cookie()} if revoked_current else None
+        self.send_json({"ok": True, "current": revoked_current}, headers=headers)
+
+    def change_password(self):
+        user = self.require_user()
+        if not user:
+            return
+        body = self.json_body()
+        if not self.rate_limit_auth(f"password:{user['id']}"):
+            return
+        current_password = str(body.get("current_password", ""))
+        new_password = str(body.get("new_password", ""))
+        if not 12 <= len(new_password) <= 1024:
+            return self.error(HTTPStatus.BAD_REQUEST, "New password must be 12–1024 characters")
+        if len(current_password) > 1024:
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid current password")
+        if current_password == new_password:
+            return self.error(HTTPStatus.CONFLICT, "New password must be different")
+        with connect() as database:
+            revoked = change_account_password(database, user["id"], current_password, new_password,
+                                              self.authenticated_session_token)
+        if revoked is None:
+            return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+        AUTH_LIMITER.clear(self.auth_limit_key(f"password:{user['id']}"))
+        self.send_json({"ok": True, "revoked_sessions": revoked})
+
+    def expired_session_cookie(self):
+        secure = "; Secure" if SECURE_COOKIES else ""
+        return f"campfire_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"
 
     def bootstrap(self):
         user = self.require_user()
@@ -892,6 +960,7 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
+        session_id = self.authenticated_session_id
         subscription, became_online = BROKER.subscribe(user["id"], MAX_EVENT_STREAMS,
                                                        MAX_EVENT_STREAMS_PER_USER)
         if subscription is None:
@@ -916,6 +985,8 @@ class App(BaseHTTPRequestHandler):
                 try:
                     event = subscription.events.get(timeout=DISCONNECT_POLL_SECONDS)
                 except queue.Empty:
+                    if not self.session_is_active(db, session_id, user["id"]):
+                        break
                     # Watch for a closed peer here rather than waiting for a write to
                     # fail, so someone leaving shows as offline in seconds.
                     if self.client_disconnected():
@@ -928,6 +999,8 @@ class App(BaseHTTPRequestHandler):
                         self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
                     continue
+                if not self.session_is_active(db, session_id, user["id"]):
+                    break
                 self.report_missed_events(subscription)
                 if not self.event_visible_to(db, event, user):
                     continue
@@ -937,10 +1010,21 @@ class App(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
+            # An SSE response has no finite body or Content-Length. Once its
+            # authorization is gone, closing the transport is the only signal
+            # that tells EventSource this response truly ended.
+            self.close_connection = True
             db.close()
             _, went_offline = BROKER.unsubscribe(subscription)
             if went_offline:
                 BROKER.publish({"type": "presence.offline", "user_id": user["id"]})
+
+    def session_is_active(self, database, session_id, user_id):
+        """Re-check a stream's session so remote revocation closes it promptly."""
+        return database.execute(
+            "SELECT 1 FROM sessions WHERE rowid=? AND user_id=? AND expires_at>?",
+            (session_id, user_id, int(time.time())),
+        ).fetchone() is not None
 
     def report_missed_events(self, subscription):
         """Tell a stream that fell behind to re-read, rather than losing events silently."""

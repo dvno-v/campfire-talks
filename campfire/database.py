@@ -47,7 +47,7 @@ def initialize_database():
         );
         CREATE TABLE IF NOT EXISTS sessions (
           token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          expires_at INTEGER NOT NULL
+          expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS communities (
           id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_id INTEGER NOT NULL REFERENCES users(id),
@@ -125,6 +125,10 @@ def initialize_database():
         if "role" not in membership_columns:
             database.execute("""ALTER TABLE memberships ADD COLUMN role TEXT NOT NULL DEFAULT 'member'
                                 CHECK (role IN ('administrator', 'moderator', 'member'))""")
+        session_columns = {row[1] for row in database.execute("PRAGMA table_info(sessions)")}
+        if "created_at" not in session_columns:
+            database.execute("ALTER TABLE sessions ADD COLUMN created_at TEXT")
+            database.execute("UPDATE sessions SET created_at=? WHERE created_at IS NULL", (utc_now(),))
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))

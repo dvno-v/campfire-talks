@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/layout.css">
   <link rel="stylesheet" href="/members.css">
   <link rel="stylesheet" href="/invites.css">
+  <link rel="stylesheet" href="/account.css">
   <link rel="stylesheet" href="/notifications.css">
 </head>
 <body>
@@ -33,7 +34,7 @@
     <aside class="sidebar">
       <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="notify-settings" class="notify-button" title="Notification settings">🔔</button><button id="manage-bans" class="hidden" title="Manage bans">⊘</button><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" class="hidden" title="Add channel">+</button></div></header>
       <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
-      <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
+      <footer><div id="avatar"></div><span id="current-user"></span><button id="account-settings" title="Account security" aria-label="Account security">⚙</button><button id="logout" title="Sign out" aria-label="Sign out">↗</button></footer>
     </aside>
     <section class="chat">
       <header class="chat-header"><b>#</b><strong id="channel-name">general</strong><span>A place to talk</span><button id="toggle-members" class="members-toggle" type="button" aria-expanded="true">People <output id="member-count">0</output></button></header>
@@ -68,6 +69,20 @@
       <header><div><p class="eyebrow">MODERATION</p><h2>Banned accounts</h2></div><button id="close-bans" type="button" aria-label="Close ban manager">×</button></header>
       <p class="muted">Banned accounts cannot rejoin with an invite. Their existing messages remain in the community history.</p>
       <div id="ban-list" class="invite-list"></div>
+    </section>
+  </dialog>
+  <dialog id="account-dialog" class="invite-dialog account-dialog">
+    <section>
+      <header><div><p class="eyebrow">ACCOUNT SECURITY</p><h2>Password and sessions</h2></div><button id="close-account" type="button" aria-label="Close account security">×</button></header>
+      <form id="password-form" class="password-form">
+        <label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <label>New password<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+        <label>Confirm new password<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
+        <p id="password-status" class="account-status" aria-live="polite"></p>
+        <button class="primary" type="submit">Change password</button>
+      </form>
+      <div class="session-heading"><h3>Active sessions</h3><p class="muted">Campfire stores only when each session began and expires—not your device, IP address, or location.</p></div>
+      <div id="session-list" class="invite-list session-list"></div>
     </section>
   </dialog>
   <script src="/app.js"></script>

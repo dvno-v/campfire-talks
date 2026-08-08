@@ -8,7 +8,7 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Data | Purpose | Default lifetime |
 | --- | --- | --- |
 | Username and password hash | Authentication | Until manually deleted |
-| Session-token digest and user link | Staying signed in | 30 days; expired rows are removed at startup |
+| Session-token digest, user link, creation time, and expiry | Staying signed in and showing active sessions | 30 days; revoked rows are deleted immediately and expired rows at startup |
 | Communities, memberships, and roles | Authorization | Until manually deleted |
 | Community bans (account, prior role, moderator, time) | Preventing invite re-entry | Until unbanned or the account/community is deleted |
 | Channel messages | Conversation history | Indefinite, until deleted by the author or a community moderator |
@@ -17,9 +17,19 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
 
-Raw passwords and raw invite codes are never stored. Campfire does not persist
-IP addresses. Authentication rate-limit state exists only in memory for five
-minutes.
+Raw passwords, raw session tokens, and raw invite codes are never stored.
+Campfire does not persist IP addresses, user agents, device names, locations,
+or session activity. Authentication rate-limit state exists only in memory for
+five minutes.
+
+The account-security screen lists only active sessions and shows their creation
+and expiry times. Revoking one deletes its row immediately and closes any live
+event stream using it within about two seconds. A password change overwrites
+the prior password hash and deletes every session except the one confirming the
+change. Neither revoked-session history nor prior password hashes are retained;
+older backups can contain the replaced rows until those backups are rotated.
+For sessions created before this field existed, the first upgraded release uses
+its startup time as the creation time because no earlier timestamp was stored.
 
 Members of the same community can see one another's username, internal user ID,
 and community role. Non-owner roles are stored on the membership; the owner
@@ -36,11 +46,12 @@ reason, note, IP address, device identifier, or ban expiry is stored. Unbanning
 deletes the ban row immediately; older backups retain it until rotated.
 
 Presence is derived from open event streams and held only in memory. Campfire
-records no last-seen time, no session history, and no connection log, so there
-is nothing to disclose about when you were here before now — restarting the
-server erases presence entirely. Whether you are currently connected is visible
-to people who already share a community with you, and to nobody else. There is
-no way to appear offline yet; if that matters to you, close the tab.
+records no last-seen time, retained session history, or connection log; an
+active session's creation time says when it was issued, not when it was last
+used. Restarting the server erases presence entirely. Whether you are currently
+connected is visible to people who already share a community with you, and to
+nobody else. There is no way to appear offline yet; if that matters to you,
+close the tab.
 
 An unread marker stores one number per account and channel: the highest message
 id that account has seen. No time of reading is recorded, so the database

@@ -30,7 +30,13 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Sessions use 256-bit random tokens, 30-day expiry, `HttpOnly`, and
   `SameSite=Strict`. Set `CAMPFIRE_SECURE_COOKIES=1` in HTTPS deployments.
   Only a SHA-256 digest of each token is stored, and only the original token is
-  accepted, so a stolen database or backup yields no usable session.
+  accepted, so a stolen database or backup yields no usable session. Accounts
+  can list their own active sessions and revoke any one without learning its
+  token; another account receives the same `404` as a missing session.
+- Password changes require the existing password, use a separate rate-limit
+  scope, replace the stored hash, and revoke every session except the caller's.
+  Live streams re-check their opening session every two seconds, so remote
+  revocation also terminates an already connected browser.
 - Usernames are unique without regard to capitalization. Sign-in resolves them
   case-insensitively, so allowing `Sam` and `sam` to coexist would let one
   account answer for the other. Startup fails closed if an older database
@@ -99,8 +105,8 @@ standard library also recommends salted, tunably slow password derivation:
 
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
-- There is no multi-factor authentication, password reset, session management
-  screen, account deletion, or invisible-mode preference. Message deletion is
+- There is no multi-factor authentication, password reset, account deletion,
+  or invisible-mode preference. Message deletion is
   joined by kick/ban, but channel-specific permissions, slow mode, audit logs,
   and temporary/time-limited moderation actions are not implemented yet.
 - Bans identify an account, not a person, network, device, or browser. Someone

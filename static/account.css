@@ -1,0 +1,75 @@
+.sidebar footer #account-settings {
+  margin-left: auto;
+}
+
+.sidebar footer #logout {
+  margin-left: 0;
+}
+
+.account-dialog > section {
+  max-height: min(760px, calc(100vh - 32px));
+  overflow-y: auto;
+}
+
+.password-form {
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+  margin-top: 22px;
+  padding-bottom: 24px;
+}
+
+.password-form label {
+  color: #c8c7ce;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.password-form input {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  display: block;
+  margin-top: 7px;
+  outline: 0;
+  padding: 11px 12px;
+  width: 100%;
+}
+
+.password-form input:focus {
+  border-color: var(--accent);
+}
+
+.account-status {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+  min-height: 18px;
+}
+
+.account-status.error {
+  color: var(--danger);
+}
+
+.session-heading {
+  margin-top: 22px;
+}
+
+.session-heading h3 {
+  margin: 0 0 5px;
+}
+
+.session-heading p {
+  font-size: 13px;
+  margin: 0;
+}
+
+.session-list {
+  margin-bottom: 0;
+}
+
+.session-current {
+  color: #6dd6a9 !important;
+  font-weight: 700;
+}

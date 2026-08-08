@@ -12,6 +12,7 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, realtime, security, uploads
+from campfire.services.accounts import change_password, list_sessions, revoke_session
 from campfire.services.communities import community_role, has_role, is_banned, list_active_invites
 from campfire.services.communities import list_community_bans, list_community_members, remove_member
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
@@ -74,8 +75,10 @@ class CampfireTests(unittest.TestCase):
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
+            session_columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
         self.assertIn("attachment_id", message_columns)
         self.assertIn("role", membership_columns)
+        self.assertIn("created_at", session_columns)
 
     def test_existing_memberships_are_migrated_to_member_role(self):
         original_path = database.DB_PATH
@@ -89,9 +92,12 @@ class CampfireTests(unittest.TestCase):
                 owner_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
               CREATE TABLE memberships (community_id INTEGER NOT NULL REFERENCES communities(id),
                 user_id INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY (community_id,user_id));
+              CREATE TABLE sessions (token TEXT PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),
+                expires_at INTEGER NOT NULL);
               INSERT INTO users VALUES(1,'legacy_owner','unused','2026-01-01T00:00:00Z');
               INSERT INTO communities VALUES(1,'Legacy',1,'2026-01-01T00:00:00Z');
               INSERT INTO memberships VALUES(1,1);
+              INSERT INTO sessions VALUES('legacy-token',1,2000000000);
             """)
             legacy.commit()
             legacy.close()
@@ -100,9 +106,46 @@ class CampfireTests(unittest.TestCase):
                 database.initialize_database()
                 with database.connect() as migrated:
                     role = migrated.execute("SELECT role FROM memberships WHERE user_id=1").fetchone()[0]
+                    session_created = migrated.execute(
+                        "SELECT created_at FROM sessions WHERE user_id=1").fetchone()[0]
             finally:
                 database.DB_PATH = original_path
         self.assertEqual(role, "member")
+        self.assertIsNotNone(session_created)
+
+    def test_password_change_and_session_revocation_keep_only_the_current_session(self):
+        with database.connect() as db:
+            user_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                 ("session_user", security.password_hash("old password long enough"),
+                                  database.utc_now())).lastrowid
+            current = security.session_hash("current-session")
+            remote = security.session_hash("remote-session")
+            other_user = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                    ("session_other", "unused", database.utc_now())).lastrowid
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (current, user_id, 2000, "2026-01-01T00:00:00Z"))
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (remote, user_id, 2000, "2026-01-02T00:00:00Z"))
+            other_id = db.execute(
+                "INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                (security.session_hash("someone-elses-session"), other_user, 2000,
+                 "2026-01-03T00:00:00Z")).lastrowid
+
+            sessions = list_sessions(db, user_id, current, timestamp=1000)
+            self.assertEqual(len(sessions), 2)
+            self.assertTrue(sessions[0]["current"])
+            self.assertIsNone(revoke_session(db, user_id, other_id, current, timestamp=1000))
+            self.assertIsNone(change_password(db, user_id, "wrong password",
+                                               "new password long enough", current))
+            revoked = change_password(db, user_id, "old password long enough",
+                                      "new password long enough", current)
+            self.assertEqual(revoked, 1)
+            self.assertTrue(security.password_matches(
+                "new password long enough",
+                db.execute("SELECT password_hash FROM users WHERE id=?", (user_id,)).fetchone()[0]))
+            self.assertEqual([entry["id"] for entry in
+                              list_sessions(db, user_id, current, timestamp=1000)],
+                             [sessions[0]["id"]])
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

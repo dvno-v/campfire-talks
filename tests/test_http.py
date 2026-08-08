@@ -50,8 +50,9 @@ class HTTPTests(unittest.TestCase):
             cls.channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                         (cls.community_id, "general", database.utc_now())).lastrowid
             cls.owner_session = secrets.token_urlsafe(32)
-            db.execute("INSERT INTO sessions VALUES(?,?,?)",
-                       (security.session_hash(cls.owner_session), cls.owner_id, int(time.time()) + 600))
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (security.session_hash(cls.owner_session), cls.owner_id,
+                        int(time.time()) + 600, database.utc_now()))
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), App)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -94,13 +95,23 @@ class HTTPTests(unittest.TestCase):
             if member:
                 db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
                            (self.community_id, user_id))
-            db.execute("INSERT INTO sessions VALUES(?,?,?)",
-                       (security.session_hash(token), user_id, int(time.time()) + 600))
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (security.session_hash(token), user_id, int(time.time()) + 600,
+                        database.utc_now()))
         return token
 
     def user_id_for(self, username):
         with database.connect() as db:
             return db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
+
+    def additional_session(self, user_id):
+        token = secrets.token_urlsafe(32)
+        with database.connect() as db:
+            session_id = db.execute(
+                "INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                (security.session_hash(token), user_id, int(time.time()) + 600,
+                 database.utc_now())).lastrowid
+        return token, session_id
 
     @contextlib.contextmanager
     def event_stream(self, cookie, timeout=8):
@@ -566,6 +577,88 @@ class HTTPTests(unittest.TestCase):
         by_channel = {entry["channel_id"]: entry for entry in payload["channels"]}
         self.assertEqual(by_channel[self.channel_id]["unread"], 0,
                          "a new member did not miss the conversation from before they were invited")
+
+    def test_sessions_are_private_and_remote_revocation_closes_the_live_stream(self):
+        primary = self.signed_in_user("session_manager")
+        user_id = self.user_id_for("session_manager")
+        remote, remote_id = self.additional_session(user_id)
+
+        status, payload, _ = self.request("GET", "/api/sessions", cookie=primary)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["sessions"]), 2)
+        self.assertEqual(sum(session["current"] for session in payload["sessions"]), 1)
+        self.assertEqual(set(payload["sessions"][0]),
+                         {"id", "created_at", "expires_at", "current"},
+                         "session tokens and device metadata must not cross the API")
+
+        outsider = self.signed_in_user("session_outsider", member=False)
+        status, _, _ = self.request("DELETE", f"/api/sessions/{remote_id}", cookie=outsider)
+        self.assertEqual(status, 404, "another account must not be able to revoke or enumerate a session")
+
+        with self.event_stream(remote, timeout=6) as stream:
+            self.assertEqual(stream.status, 200)
+            time.sleep(0.3)
+            status, result, _ = self.request("DELETE", f"/api/sessions/{remote_id}", cookie=primary)
+            self.assertEqual(status, 200)
+            self.assertIs(result["current"], False)
+            disconnected = False
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    line = stream.fp.readline()
+                except TimeoutError:
+                    break
+                if not line:
+                    disconnected = True
+                    break
+        self.assertTrue(disconnected, "a revoked session's live stream stayed connected")
+
+        _, payload, _ = self.request("GET", "/api/me", cookie=remote)
+        self.assertIsNone(payload["user"])
+        _, payload, _ = self.request("GET", "/api/sessions", cookie=primary)
+        self.assertEqual(len(payload["sessions"]), 1)
+        self.assertIs(payload["sessions"][0]["current"], True)
+
+    def test_password_change_verifies_the_current_password_and_revokes_other_sessions(self):
+        status, _, current = self.request("POST", "/api/register", {
+            "username": "password_changer", "password": PASSWORD, "invite": self.invite_token()})
+        self.assertEqual(status, 201)
+        remote, _ = self.additional_session(self.user_id_for("password_changer"))
+        replacement = "a different sufficiently long password"
+
+        status, payload, _ = self.request("PATCH", "/api/account/password", {
+            "current_password": "not the current password", "new_password": replacement}, cookie=current)
+        self.assertEqual(status, 403)
+        self.assertIn("incorrect", payload["error"].lower())
+
+        status, payload, _ = self.request("PATCH", "/api/account/password", {
+            "current_password": PASSWORD, "new_password": replacement}, cookie=current)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["revoked_sessions"], 1)
+
+        _, payload, _ = self.request("GET", "/api/me", cookie=current)
+        self.assertEqual(payload["user"]["username"], "password_changer")
+        _, payload, _ = self.request("GET", "/api/me", cookie=remote)
+        self.assertIsNone(payload["user"])
+        status, _, _ = self.request("POST", "/api/login", {
+            "username": "password_changer", "password": PASSWORD})
+        self.assertEqual(status, 401)
+        status, _, replacement_session = self.request("POST", "/api/login", {
+            "username": "password_changer", "password": replacement})
+        self.assertEqual(status, 200)
+        self.assertTrue(replacement_session)
+
+    def test_the_current_session_can_sign_itself_out(self):
+        current = self.signed_in_user("self_revoker")
+        _, payload, _ = self.request("GET", "/api/sessions", cookie=current)
+        session_id = payload["sessions"][0]["id"]
+        status, payload, cleared_cookie = self.request(
+            "DELETE", f"/api/sessions/{session_id}", cookie=current)
+        self.assertEqual(status, 200)
+        self.assertIs(payload["current"], True)
+        self.assertEqual(cleared_cookie, "")
+        _, payload, _ = self.request("GET", "/api/me", cookie=current)
+        self.assertIsNone(payload["user"])
 
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")

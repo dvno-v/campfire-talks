@@ -37,6 +37,33 @@ characters.
 
 Deletes the current server-side session and expires the browser cookie.
 
+### `PATCH /api/account/password`
+
+```json
+{
+  "current_password": "the current passphrase",
+  "new_password": "a different long unique passphrase"
+}
+```
+
+Requires the current password, accepts a 12–1024 character replacement, and
+is rate-limited independently from sign-in. A successful change keeps the
+session making the request and immediately revokes every other session for the
+account. The response reports that count as `revoked_sessions`.
+
+### `GET /api/sessions`
+
+Returns the caller's unexpired sessions with `id`, `created_at`, `expires_at`,
+and `current`. The raw token, IP address, user agent, device name, location, and
+last-activity time are neither returned nor collected.
+
+### `DELETE /api/sessions/{session_id}`
+
+Revokes one session owned by the caller. Missing sessions and sessions owned by
+another account both return `404`. Revoking the current session also expires
+its browser cookie. Revoking another session closes its live event stream in
+about two seconds; that browser returns to sign-in when it detects the loss.
+
 ### `GET /api/me`
 
 Returns `{"user": null}` when signed out or the current public user object.
@@ -244,8 +271,8 @@ also re-read after any reconnect: `EventSource` reconnects on its own, and
 anything published during the gap was never delivered. Re-reading rather than
 fetching `?after=` is deliberate — a gap can hide edits and deletions too.
 
-Authorization is re-checked per event, because membership can change while a
-stream is open:
+Authorization and the opening session are re-checked while a stream is open,
+because membership or session validity can change:
 
 - message events reach members of the channel's community;
 - `member.*` and `channel.*` events reach members of `community_id`; a removed
@@ -255,8 +282,8 @@ stream is open:
   subject, so being connected is never observable by strangers.
 
 The server emits a keepalive every 20 seconds and separately polls for a closed
-peer every two seconds, so a departure is announced in about two seconds rather
-than waiting for a failed keepalive write.
+peer or revoked session every two seconds, so a departure or remote sign-out is
+noticed promptly rather than waiting for a failed keepalive write.
 
 ## Unread markers and notification preferences
 
