@@ -12,7 +12,8 @@ and the browser receives live messages over Server-Sent Events.
 - Communities and text channels
 - Authorized member lists with roles and online presence
 - Owner-assigned administrators and moderators; administrators manage channels
-  and invites, while moderators can remove messages
+  and invites, while moderators can remove messages and lower-ranked members
+- Role-aware kick, persistent ban, ban listing, and unban controls
 - Persistent messages, editable by their author and removable by the author or
   a community moderator
 - Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit), stored
@@ -47,7 +48,7 @@ python3 -m unittest discover -s tests -v
 
 ## Near-term roadmap
 
-1. Kick/ban, channel permissions, slow mode, and upload controls
+1. Channel permissions, slow mode, and upload controls
 2. Account/session controls and per-community retention settings
 3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
 4. Voice rooms through a dedicated WebRTC SFU

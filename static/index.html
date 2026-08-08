@@ -31,7 +31,7 @@
   <main id="app" class="app hidden">
     <aside class="rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
     <aside class="sidebar">
-      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="notify-settings" class="notify-button" title="Notification settings">🔔</button><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" class="hidden" title="Add channel">+</button></div></header>
+      <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="notify-settings" class="notify-button" title="Notification settings">🔔</button><button id="manage-bans" class="hidden" title="Manage bans">⊘</button><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" class="hidden" title="Add channel">+</button></div></header>
       <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
       <footer><div id="avatar"></div><span id="current-user"></span><button id="logout" title="Sign out">↗</button></footer>
     </aside>
@@ -61,6 +61,13 @@
       <p id="notify-permission" class="notify-permission"></p>
       <button id="enable-notifications" class="primary hidden" type="button">Allow desktop notifications</button>
       <div id="notify-channels" class="invite-list"></div>
+    </section>
+  </dialog>
+  <dialog id="ban-dialog" class="invite-dialog">
+    <section>
+      <header><div><p class="eyebrow">MODERATION</p><h2>Banned accounts</h2></div><button id="close-bans" type="button" aria-label="Close ban manager">×</button></header>
+      <p class="muted">Banned accounts cannot rejoin with an invite. Their existing messages remain in the community history.</p>
+      <div id="ban-list" class="invite-list"></div>
     </section>
   </dialog>
   <script src="/app.js"></script>

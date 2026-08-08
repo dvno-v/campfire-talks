@@ -43,6 +43,7 @@ async function enterApp() {
     if (event.type.startsWith('presence.')) return applyPresence(event);
     if (event.type === 'member.joined') return applyMemberJoined(event);
     if (event.type === 'member.updated') return applyMemberUpdated(event);
+    if (event.type === 'member.removed') return applyMemberRemoved(event);
     if (event.type === 'channel.created') return applyChannelCreated(event);
     if (event.type === 'message.created') countUnread(event);
     if (event.type === 'message.deleted') discountUnread(event);
@@ -63,6 +64,7 @@ function renderCommunities() {
 function selectCommunity(community) {
   if ($('#invite-dialog').open) $('#invite-dialog').close();
   if ($('#notify-dialog').open) $('#notify-dialog').close();
+  if ($('#ban-dialog').open) $('#ban-dialog').close();
   state.community = community; $('#community-name').textContent = community?.name || 'Campfire'; renderCommunities();
   state.members = []; renderMembers();
   renderChannels();
@@ -191,7 +193,8 @@ function memberRoleControl(member) {
 }
 
 function memberRow(member) {
-  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${memberRoleControl(member)}</div></article>`;
+  const actions = canModerateMember(member) ? `<div class="member-actions"><button type="button" data-kick-member="${Number(member.id)}">Kick</button><button type="button" data-ban-member="${Number(member.id)}">Ban</button></div>` : '';
+  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${memberRoleControl(member)}${actions}</div></article>`;
 }
 
 function renderMembers() {
@@ -199,6 +202,7 @@ function renderMembers() {
   const manages = ['owner', 'administrator'].includes(currentCommunityRole());
   $('#invite-friend').classList.toggle('hidden', !manages);
   $('#add-channel').classList.toggle('hidden', !manages);
+  $('#manage-bans').classList.toggle('hidden', roleRank(currentCommunityRole()) < roleRank('moderator'));
   if (!state.members.length) { $('#member-list').innerHTML = '<p class="member-empty">Loading members…</p>'; return; }
   const groups = [['ONLINE', state.members.filter(m => state.online.has(m.id))], ['OFFLINE', state.members.filter(m => !state.online.has(m.id))]];
   $('#member-list').innerHTML = groups.filter(([, members]) => members.length)
@@ -207,6 +211,14 @@ function renderMembers() {
     const member = state.members.find(entry => entry.id === Number(select.dataset.memberRole));
     select.value = member.role;
     select.onchange = () => { select.disabled = true; updateMemberRole(member, select.value); };
+  });
+  document.querySelectorAll('[data-kick-member]').forEach(button => {
+    const member = state.members.find(entry => entry.id === Number(button.dataset.kickMember));
+    button.onclick = () => moderateMember(member, false);
+  });
+  document.querySelectorAll('[data-ban-member]').forEach(button => {
+    const member = state.members.find(entry => entry.id === Number(button.dataset.banMember));
+    button.onclick = () => moderateMember(member, true);
   });
 }
 
@@ -241,12 +253,32 @@ function applyMemberUpdated(event) {
   renderMembers(); refreshMessages();
 }
 
+function applyMemberRemoved(event) {
+  if (Number(event.user_id) === state.user?.id) return enterApp();
+  if (event.community_id !== state.community?.id) return;
+  state.members = state.members.filter(member => member.id !== Number(event.user_id));
+  state.online.delete(Number(event.user_id));
+  renderMembers(); refreshMessages();
+  if (event.banned && $('#ban-dialog').open) loadBans();
+}
+
 async function updateMemberRole(member, role) {
   try {
     const updated = await api(`/api/communities/${state.community.id}/members/${Number(member.id)}`, {
       method: 'PATCH', body: JSON.stringify({ role }) });
     applyMemberUpdated({ type: 'member.updated', community_id: state.community.id, member: updated });
   } catch (error) { alert(error.message); renderMembers(); }
+}
+
+async function moderateMember(member, banned) {
+  const consequence = banned ? ' They will not be able to rejoin until unbanned.' : '';
+  if (!confirm(`${banned ? 'Ban' : 'Kick'} ${member.username}?${consequence}`)) return;
+  try {
+    const path = `/api/communities/${state.community.id}/members/${Number(member.id)}${banned ? '/ban' : ''}`;
+    await api(path, { method: banned ? 'POST' : 'DELETE', ...(banned ? { body: '{}' } : {}) });
+    applyMemberRemoved({ type: 'member.removed', community_id: state.community.id,
+      user_id: member.id, banned });
+  } catch (error) { alert(error.message); }
 }
 
 // Re-reads the channel outright: a gap can hide edits and deletions too, not
@@ -261,6 +293,9 @@ function applyChannelCreated(event) {
 }
 
 function currentCommunityRole() { return state.community?.role || state.members.find(member => member.id === state.user?.id)?.role || 'member'; }
+function roleRank(role) { return { member: 0, moderator: 1, administrator: 2, owner: 3 }[role] ?? 0; }
+function canModerateRole(role) { return roleRank(currentCommunityRole()) >= roleRank('moderator') && roleRank(currentCommunityRole()) > roleRank(role); }
+function canModerateMember(member) { return member.id !== state.user?.id && canModerateRole(member.role); }
 function mayModerate() { return ['owner', 'administrator', 'moderator'].includes(currentCommunityRole()); }
 function roleBadge(userId) { const role=state.members.find(member=>member.id===Number(userId))?.role; return role && role!=='member' ? `<span class="owner-indicator">${escapeHTML(role.toUpperCase())}</span>` : ''; }
 // Author role badges depend on the member list, which arrives after the first messages.
@@ -268,7 +303,14 @@ function refreshMessages() { document.querySelectorAll('.message-row').forEach(r
 
 async function selectChannel(channel) {
   state.channel = channel; state.unreadBoundary = false;
-  if (!channel) return;
+  if (!channel) {
+    $('#channel-name').textContent = '';
+    $('#message').placeholder = 'Choose or create a community'; $('#message').disabled = true;
+    $('#upload-button').disabled = true;
+    state.messages.clear(); $('#messages').innerHTML = '<div class="empty"><div>C</div><h2>No community selected</h2><p>Create one or join with an invite.</p></div>';
+    return;
+  }
+  $('#message').disabled = false; $('#upload-button').disabled = false;
   $('#channel-name').textContent = channel.name; $('#message').placeholder = `Message #${channel.name}`;
   renderChannels();
   // Read the marker before anything clears it: it decides where the divider goes.
@@ -358,6 +400,10 @@ $('#close-invites').onclick = () => $('#invite-dialog').close();
 $('#create-invite').onclick = async () => { if(!state.community)return; const button=$('#create-invite'); button.disabled=true; try { const data=await api('/api/invites',{method:'POST',body:JSON.stringify({community_id:state.community.id,max_uses:10,lifetime_hours:24})}); if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(data.token); alert('Invite code copied. It expires in 24 hours.');}else{prompt('Copy this invite code. It expires in 24 hours.',data.token);} await loadInvites(); } catch(error){alert(error.message);} finally {button.disabled=false;} };
 async function loadInvites() { const communityId=state.community?.id; if(!communityId)return; $('#invite-list').innerHTML='<p class="member-empty">Loading invites…</p>'; try { const data=await api(`/api/communities/${communityId}/invites`); if(state.community?.id!==communityId)return; $('#invite-list').innerHTML=data.invites.length?data.invites.map(invite=>`<article class="invite-row"><div><strong>Invite #${Number(invite.id)}</strong><span>Created by ${escapeHTML(invite.creator_username)} · ${Number(invite.uses)}/${Number(invite.max_uses)} uses</span><span>Expires ${new Date(Number(invite.expires_at)*1000).toLocaleString()}</span></div><button type="button" data-revoke-invite="${Number(invite.id)}">Revoke</button></article>`).join(''):'<p class="member-empty">No active invites.</p>'; document.querySelectorAll('[data-revoke-invite]').forEach(button=>button.onclick=()=>revokeInvite(Number(button.dataset.revokeInvite))); } catch(error){ $('#invite-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
 async function revokeInvite(inviteId) { if(!confirm(`Revoke invite #${inviteId}? Every copy will stop working immediately.`))return; try { await api(`/api/invites/${inviteId}`,{method:'DELETE'}); await loadInvites(); } catch(error){alert(error.message);} }
+$('#manage-bans').onclick = async () => { if(!state.community)return; $('#ban-dialog').showModal(); await loadBans(); };
+$('#close-bans').onclick = () => $('#ban-dialog').close();
+async function loadBans() { const communityId=state.community?.id; if(!communityId)return; $('#ban-list').innerHTML='<p class="member-empty">Loading bans…</p>'; try { const data=await api(`/api/communities/${communityId}/bans`); if(state.community?.id!==communityId)return; $('#ban-list').innerHTML=data.bans.length?data.bans.map(ban=>`<article class="invite-row"><div><strong>${escapeHTML(ban.username)}</strong><span>Banned by ${escapeHTML(ban.banned_by_username||'a former moderator')} · ${new Date(ban.created_at).toLocaleString()}</span></div>${canModerateRole(ban.role_at_ban)?`<button type="button" data-unban-member="${Number(ban.user_id)}">Unban</button>`:''}</article>`).join(''):'<p class="member-empty">No banned accounts.</p>'; document.querySelectorAll('[data-unban-member]').forEach(button=>button.onclick=()=>unbanMember(Number(button.dataset.unbanMember))); } catch(error){ $('#ban-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
+async function unbanMember(userId) { if(!confirm('Allow this account to join again?'))return; try { await api(`/api/communities/${state.community.id}/bans/${userId}`,{method:'DELETE'}); await loadBans(); } catch(error){alert(error.message);} }
 $('#add-channel').onclick = async () => { if(!state.community)return; const name=prompt('Channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); selectChannel(channel); } catch(error){alert(error.message);} };
 
 $('#notify-settings').onclick = () => { $('#notify-dialog').showModal(); renderNotificationSettings(); };

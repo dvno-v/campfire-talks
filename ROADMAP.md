@@ -38,7 +38,8 @@ does not lose data; all persistent data is documented.
 Status: in progress
 
 - [x] Roles: owner, administrator, moderator, member
-- [ ] Kick/ban, channel permissions, slow mode, and upload controls
+- [x] Kick/ban with role hierarchy and invite re-entry prevention
+- [ ] Channel permissions, slow mode, and upload controls
 - [ ] Account password change, active-session list, and remote session revocation
 - [ ] Per-community message and attachment retention settings
 - [ ] User account deletion and operator-assisted data export

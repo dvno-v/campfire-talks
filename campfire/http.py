@@ -28,8 +28,11 @@ from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
-from .services.communities import ASSIGNABLE_ROLES, has_role, is_member, list_active_invites
-from .services.communities import list_community_members, set_member_role, shares_community
+from .services.communities import ASSIGNABLE_ROLES, community_role, has_role, is_banned, is_member
+from .services.communities import list_active_invites, list_community_bans, list_community_members
+from .services.communities import remove_member as remove_community_member
+from .services.communities import set_member_role, shares_community
+from .services.communities import unban_member as unban_community_member
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
@@ -166,6 +169,8 @@ class App(BaseHTTPRequestHandler):
             return self.community_members(path)
         if path.startswith("/api/communities/") and path.endswith("/invites"):
             return self.community_invites(path)
+        if path.startswith("/api/communities/") and path.endswith("/bans"):
+            return self.community_bans(path)
         if path.startswith("/api/attachments/"):
             return self.serve_attachment(path)
         if path.startswith("/api/channels/") and path.endswith("/messages"):
@@ -197,6 +202,8 @@ class App(BaseHTTPRequestHandler):
                 return self.upload_attachment(path)
             if path.startswith("/api/channels/") and path.endswith("/read"):
                 return self.mark_channel_read(path)
+            if path.startswith("/api/communities/") and path.endswith("/ban"):
+                return self.ban_member(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -211,6 +218,10 @@ class App(BaseHTTPRequestHandler):
                 return self.revoke_invite(path)
             if path.startswith("/api/messages/"):
                 return self.delete_message(path)
+            if path.startswith("/api/communities/") and "/bans/" in path:
+                return self.unban_member(path)
+            if path.startswith("/api/communities/") and "/members/" in path:
+                return self.kick_member(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -470,18 +481,104 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.FORBIDDEN, "Only community administrators can manage invites")
         self.send_json({"invites": invitations})
 
-    def update_member_role(self, path):
+    def community_member_ids(self, path, suffix=""):
+        """Parse an exact community member resource path, closing on failure."""
+        try:
+            parts = path.split("/")
+            expected = ["", "api", "communities", parts[3], "members", parts[5]]
+            if suffix:
+                expected.append(suffix)
+            if parts != expected:
+                raise ValueError
+            return int(parts[3]), int(parts[5])
+        except (ValueError, IndexError):
+            self.close_connection = True
+            self.error(HTTPStatus.BAD_REQUEST, "Invalid community member")
+            return None
+
+    def community_ban_ids(self, path):
+        try:
+            parts = path.split("/")
+            if len(parts) != 6 or parts[4] != "bans":
+                raise ValueError
+            return int(parts[3]), int(parts[5])
+        except (ValueError, IndexError):
+            self.close_connection = True
+            self.error(HTTPStatus.BAD_REQUEST, "Invalid community ban")
+            return None
+
+    def community_bans(self, path):
         user = self.require_user()
         if not user:
             return
         try:
-            parts = path.split("/")
-            community_id, member_id = int(parts[3]), int(parts[5])
-            if len(parts) != 6 or parts[4] != "members":
-                raise ValueError
+            community_id = int(path.split("/")[3])
         except (ValueError, IndexError):
-            self.close_connection = True
-            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community member")
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
+        with connect() as database:
+            role = community_role(database, community_id, user["id"])
+            if role is None:
+                return self.error(HTTPStatus.NOT_FOUND, "Community not found")
+            bans = list_community_bans(database, community_id, user["id"])
+        if bans is None:
+            return self.error(HTTPStatus.FORBIDDEN, "Only community moderators can view bans")
+        self.send_json({"bans": bans})
+
+    def moderate_member(self, path, ban):
+        user = self.require_user()
+        if not user:
+            return
+        identifiers = self.community_member_ids(path, "ban" if ban else "")
+        if not identifiers:
+            return
+        community_id, member_id = identifiers
+        if ban:
+            self.json_body()  # validate and consume the bounded request body
+        with connect() as database:
+            status, member = remove_community_member(
+                database, community_id, member_id, user["id"], ban=ban)
+        if status == "community_not_found":
+            return self.error(HTTPStatus.NOT_FOUND, "Community not found")
+        if status == "member_not_found":
+            return self.error(HTTPStatus.NOT_FOUND, "Member not found")
+        if status != "ok":
+            return self.error(HTTPStatus.FORBIDDEN, "You can only moderate members below your role")
+        BROKER.publish({"type": "member.removed", "community_id": community_id,
+                        "user_id": member_id, "banned": ban})
+        self.send_json({"ok": True, "member": member})
+
+    def kick_member(self, path):
+        return self.moderate_member(path, ban=False)
+
+    def ban_member(self, path):
+        return self.moderate_member(path, ban=True)
+
+    def unban_member(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        identifiers = self.community_ban_ids(path)
+        if not identifiers:
+            return
+        community_id, member_id = identifiers
+        with connect() as database:
+            status = unban_community_member(database, community_id, member_id, user["id"])
+        if status == "community_not_found":
+            return self.error(HTTPStatus.NOT_FOUND, "Community not found")
+        if status == "ban_not_found":
+            return self.error(HTTPStatus.NOT_FOUND, "Ban not found")
+        if status != "ok":
+            return self.error(HTTPStatus.FORBIDDEN, "You can only unban members below your role")
+        self.send_json({"ok": True})
+
+    def update_member_role(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        identifiers = self.community_member_ids(path)
+        if not identifiers:
+            return
+        community_id, member_id = identifiers
         role = str(self.json_body().get("role", ""))
         if role not in ASSIGNABLE_ROLES:
             return self.error(HTTPStatus.BAD_REQUEST,
@@ -579,6 +676,8 @@ class App(BaseHTTPRequestHandler):
                                   (invitation["community_id"], user["id"])).fetchone()
             if existing:
                 return self.error(HTTPStatus.CONFLICT, "You are already a member of that community")
+            if is_banned(db, invitation["community_id"], user["id"]):
+                return self.error(HTTPStatus.FORBIDDEN, "You are banned from that community")
             updated = db.execute("UPDATE invitations SET uses=uses+1 WHERE id=? AND uses<max_uses",
                                  (invitation["id"],))
             if updated.rowcount != 1:
@@ -865,6 +964,8 @@ class App(BaseHTTPRequestHandler):
         subject = event["type"].split(".")[0]
         if subject == "presence":
             return shares_community(db, event["user_id"], user["id"])
+        if event["type"] == "member.removed" and event["user_id"] == user["id"]:
+            return True
         if subject in {"member", "channel"}:
             return is_member(db, event["community_id"], user["id"])
         return bool(self.member_channel(db, event["channel_id"], user["id"]))

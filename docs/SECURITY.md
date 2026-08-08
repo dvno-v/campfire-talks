@@ -53,11 +53,17 @@ encrypted. A compromised host, browser, or administrator can read them.
   community they concern, re-checked per event rather than trusted from the
   moment the stream opened.
 - Community roles form an explicit privilege ladder: members can chat,
-  moderators can remove messages, administrators can also manage channels and
-  invites, and owners can additionally assign roles. Ownership is derived from
-  the community and cannot be reassigned through the role endpoint. Every role
-  change verifies current ownership server-side; the browser's controls are not
-  trusted.
+  moderators can remove messages and members, administrators can also manage
+  channels and invites, and owners can additionally assign roles. A moderator
+  can act only on lower roles, never themselves, a peer, or a higher role.
+  Ownership is derived from the community and cannot be reassigned through the
+  role endpoint. Every role and moderation action is verified server-side; the
+  browser's controls are not trusted.
+- Kicking deletes membership plus community-specific read and notification
+  state. Banning additionally writes one unique account/community ban and
+  checks it before consuming an invite. The removed account receives only its
+  own removal event; subsequent community events fail the normal membership
+  check.
 - Editing a message requires authorship; deleting one requires authorship or a
   moderator-or-higher role. Elevated roles deliberately do not grant the right
   to rewrite another member's words, only to remove them. Non-members receive
@@ -95,8 +101,12 @@ standard library also recommends salted, tunably slow password derivation:
   independent security audit.
 - There is no multi-factor authentication, password reset, session management
   screen, account deletion, or invisible-mode preference. Message deletion is
-  currently the only moderator action; kick/ban and channel-specific
-  permissions are not implemented yet.
+  joined by kick/ban, but channel-specific permissions, slow mode, audit logs,
+  and temporary/time-limited moderation actions are not implemented yet.
+- Bans identify an account, not a person, network, device, or browser. Someone
+  who obtains another invite can create a differently named account; Campfire
+  intentionally does not persist IP addresses or add device fingerprinting to
+  prevent this.
 - Messages are not end-to-end encrypted and are retained until someone deletes
   them. Deletion does not reach backups taken beforehand.
 - Voice and screen sharing are not implemented yet.

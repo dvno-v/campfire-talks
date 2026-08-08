@@ -151,6 +151,23 @@
   padding: 2px 4px;
 }
 
+.member-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.member-actions button {
+  background: #ffffff0a;
+  color: var(--muted);
+  font-size: 10px;
+  padding: 3px 6px;
+}
+
+.member-actions button:last-child {
+  color: #e89b92;
+}
+
 .owner-indicator {
   border: 1px solid #ff9a6255;
   border-radius: 4px;

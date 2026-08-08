@@ -282,6 +282,77 @@ class HTTPTests(unittest.TestCase):
         community = next(item for item in bootstrap["communities"] if item["id"] == self.community_id)
         self.assertEqual(community["role"], "administrator")
 
+    def test_kicks_allow_rejoining_while_bans_block_it_until_removed(self):
+        moderator = self.signed_in_user("http_kickban_moderator")
+        moderator_id = self.user_id_for("http_kickban_moderator")
+        self.request("PATCH", f"/api/communities/{self.community_id}/members/{moderator_id}",
+                     {"role": "moderator"}, cookie=self.owner_session)
+
+        kicked = self.signed_in_user("http_kicked_member")
+        kicked_id = self.user_id_for("http_kicked_member")
+        with self.event_stream(kicked) as stream:
+            time.sleep(0.3)
+            status, _, _ = self.request(
+                "DELETE", f"/api/communities/{self.community_id}/members/{kicked_id}",
+                cookie=moderator)
+            event = self.await_event(stream, lambda item: item.get("type") == "member.removed")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(event, "the kicked account must learn that its access changed")
+        self.assertIs(event["banned"], False)
+        status, _, _ = self.request("POST", "/api/invites/join",
+                                    {"invite": self.invite_token()}, cookie=kicked)
+        self.assertEqual(status, 201, "a kick must not silently become a permanent ban")
+
+        banned = self.signed_in_user("http_banned_member")
+        banned_id = self.user_id_for("http_banned_member")
+        token = self.invite_token()
+        token_hash = security.invite_hash(token)
+        with self.event_stream(banned) as stream:
+            time.sleep(0.3)
+            status, _, _ = self.request(
+                "POST", f"/api/communities/{self.community_id}/members/{banned_id}/ban",
+                {}, cookie=moderator)
+            event = self.await_event(stream, lambda item: item.get("type") == "member.removed")
+        self.assertEqual(status, 200)
+        self.assertIsNotNone(event)
+        self.assertIs(event["banned"], True)
+
+        status, payload, _ = self.request("POST", "/api/invites/join", {"invite": token}, cookie=banned)
+        self.assertEqual(status, 403)
+        self.assertIn("banned", payload["error"])
+        with database.connect() as db:
+            uses = db.execute("SELECT uses FROM invitations WHERE token_hash=?", (token_hash,)).fetchone()[0]
+        self.assertEqual(uses, 0, "refusing a banned account must not consume the invite")
+
+        status, payload, _ = self.request(
+            "GET", f"/api/communities/{self.community_id}/bans", cookie=moderator)
+        self.assertEqual(status, 200)
+        self.assertIn(banned_id, {entry["user_id"] for entry in payload["bans"]})
+        status, _, _ = self.request(
+            "DELETE", f"/api/communities/{self.community_id}/bans/{banned_id}", cookie=moderator)
+        self.assertEqual(status, 200)
+        status, _, _ = self.request("POST", "/api/invites/join", {"invite": token}, cookie=banned)
+        self.assertEqual(status, 201)
+
+    def test_moderators_cannot_remove_peers_or_higher_roles(self):
+        moderator = self.signed_in_user("http_hierarchy_moderator")
+        moderator_id = self.user_id_for("http_hierarchy_moderator")
+        administrator = self.signed_in_user("http_hierarchy_administrator")
+        administrator_id = self.user_id_for("http_hierarchy_administrator")
+        self.request("PATCH", f"/api/communities/{self.community_id}/members/{moderator_id}",
+                     {"role": "moderator"}, cookie=self.owner_session)
+        self.request("PATCH", f"/api/communities/{self.community_id}/members/{administrator_id}",
+                     {"role": "administrator"}, cookie=self.owner_session)
+
+        status, _, _ = self.request(
+            "POST", f"/api/communities/{self.community_id}/members/{administrator_id}/ban",
+            {}, cookie=moderator)
+        self.assertEqual(status, 403)
+        status, _, _ = self.request(
+            "DELETE", f"/api/communities/{self.community_id}/members/{moderator_id}",
+            cookie=moderator)
+        self.assertEqual(status, 403, "moderators must not remove themselves")
+
     def test_bystanders_cannot_delete_and_outsiders_cannot_see(self):
         author = self.signed_in_user("http_delete_author")
         bystander = self.signed_in_user("http_delete_bystander")

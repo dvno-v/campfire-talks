@@ -12,9 +12,9 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, realtime, security, uploads
-from campfire.services.communities import community_role, has_role, list_active_invites
-from campfire.services.communities import list_community_members, revoke_invite, set_member_role
-from campfire.services.communities import shares_community
+from campfire.services.communities import community_role, has_role, is_banned, list_active_invites
+from campfire.services.communities import list_community_bans, list_community_members, remove_member
+from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
 from campfire.services.notifications import set_account_mode, set_channel_mode
@@ -70,7 +70,7 @@ class CampfireTests(unittest.TestCase):
             names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages",
                          "invitations", "attachments", "channel_reads", "notification_preferences",
-                         "channel_notifications"} <= names)
+                         "channel_notifications", "community_bans"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
@@ -313,6 +313,61 @@ class CampfireTests(unittest.TestCase):
             self.assertFalse(set_member_role(db, community_id, owner_id, owner_id, "member"))
             self.assertIsNone(set_member_role(db, community_id, owner_id, member_id, "member"))
             self.assertEqual(community_role(db, community_id, owner_id), "owner")
+
+    def test_kick_and_ban_follow_role_hierarchy_and_clear_member_state(self):
+        with database.connect() as db:
+            actors = {}
+            for role in ("owner", "administrator", "moderator", "member", "second_member"):
+                actors[role] = db.execute(
+                    "INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                    (f"moderation_{role}", "unused", database.utc_now())).lastrowid
+            community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                      ("Moderation", actors["owner"], database.utc_now())).lastrowid
+            for role in actors:
+                stored_role = role if role in {"administrator", "moderator"} else "member"
+                db.execute("INSERT INTO memberships(community_id,user_id,role) VALUES(?,?,?)",
+                           (community_id, actors[role], stored_role))
+            channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                                    (community_id, "general", database.utc_now())).lastrowid
+            message_id = db.execute(
+                "INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                (channel_id, actors["member"], "keep this history", database.utc_now())).lastrowid
+            db.execute("INSERT INTO channel_reads VALUES(?,?,?)",
+                       (actors["member"], channel_id, message_id))
+            db.execute("INSERT INTO channel_notifications VALUES(?,?,?)",
+                       (actors["member"], channel_id, "none"))
+
+            denied, _ = remove_member(db, community_id, actors["administrator"],
+                                      actors["moderator"])
+            self.assertEqual(denied, "forbidden")
+            kicked, _ = remove_member(db, community_id, actors["member"], actors["moderator"])
+            self.assertEqual(kicked, "ok")
+            self.assertIsNone(db.execute("SELECT 1 FROM memberships WHERE community_id=? AND user_id=?",
+                                         (community_id, actors["member"])).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM channel_reads WHERE user_id=? AND channel_id=?",
+                                         (actors["member"], channel_id)).fetchone())
+            self.assertIsNone(db.execute("SELECT 1 FROM channel_notifications WHERE user_id=? AND channel_id=?",
+                                         (actors["member"], channel_id)).fetchone())
+            self.assertIsNotNone(db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone(),
+                                 "moderation removes access, not conversation history")
+
+            banned, _ = remove_member(db, community_id, actors["second_member"],
+                                      actors["moderator"], ban=True)
+            self.assertEqual(banned, "ok")
+            self.assertTrue(is_banned(db, community_id, actors["second_member"]))
+            self.assertEqual([entry["user_id"] for entry in
+                              list_community_bans(db, community_id, actors["moderator"])],
+                             [actors["second_member"]])
+            self.assertEqual(unban_member(db, community_id, actors["second_member"],
+                                          actors["moderator"]), "ok")
+
+            owner_ban, _ = remove_member(db, community_id, actors["administrator"],
+                                         actors["owner"], ban=True)
+            self.assertEqual(owner_ban, "ok")
+            self.assertEqual(unban_member(db, community_id, actors["administrator"],
+                                          actors["moderator"]), "forbidden")
+            self.assertEqual(unban_member(db, community_id, actors["administrator"],
+                                          actors["owner"]), "ok")
 
     def message_fixture(self, db, label, attachment=False):
         """Build an owner, an author, a bystander, an outsider, and one message."""

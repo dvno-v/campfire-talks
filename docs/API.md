@@ -82,6 +82,33 @@ current non-owner member. Members cannot promote themselves. The owner role is
 derived from community ownership and cannot be assigned or removed through
 this endpoint. Outsiders receive `404`; non-owner members receive `403`.
 
+### `DELETE /api/communities/{community_id}/members/{user_id}`
+
+Kicks a current member. Moderators may kick members, administrators may also
+kick moderators, and owners may kick any non-owner. Actors cannot kick
+themselves, peers, or higher roles. A kick removes the membership and that
+account's community-specific read markers and notification overrides. Existing
+messages and attachments remain in community history. The account may rejoin
+with a valid invite.
+
+### `POST /api/communities/{community_id}/members/{user_id}/ban`
+
+Accepts an empty JSON object. It applies the same hierarchy as kicking, removes
+the membership, and stores a persistent account ban. A banned account receives
+`403` from invite joining before the invite's use count changes.
+
+### `GET /api/communities/{community_id}/bans`
+
+Moderators and above receive the banned account's ID and username, its role at
+the time of the ban, the banning moderator when that account still exists, and
+the creation time. No free-form reason or moderation notes are stored.
+
+### `DELETE /api/communities/{community_id}/bans/{user_id}`
+
+Unbans an account when the caller's current role is higher than the account's
+role at the time it was banned. The account is not automatically re-added; it
+may use an invite again.
+
 ### `POST /api/communities`
 
 ```json
@@ -133,7 +160,8 @@ next use. Missing or unauthorized invites both return `404`.
 
 Adds an existing account to the invitation’s community. Existing members are
 told over `/api/events`, so the arrival appears in their member list without a
-reload. Registering with an invite announces the same event.
+reload. Registering with an invite announces the same event. A persistent ban
+is checked before the invitation is consumed.
 
 ## Messages
 
@@ -205,6 +233,7 @@ resource identifier described below:
 | `presence.offline` | `user_id`, sent when its last stream closes |
 | `member.joined` | `community_id` and the new `member` object |
 | `member.updated` | `community_id` and the member's new public role object |
+| `member.removed` | `community_id`, `user_id`, and whether this was a ban |
 | `channel.created` | `community_id`, `id`, and `name` |
 | `stream.reset` | nothing; the client must re-read the channel it is viewing |
 
@@ -219,7 +248,9 @@ Authorization is re-checked per event, because membership can change while a
 stream is open:
 
 - message events reach members of the channel's community;
-- `member.*` and `channel.*` events reach members of `community_id`;
+- `member.*` and `channel.*` events reach members of `community_id`; a removed
+  account also receives its own `member.removed` event so it can discard the
+  community immediately;
 - presence events reach only accounts that already share a community with the
   subject, so being connected is never observable by strangers.
 

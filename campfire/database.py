@@ -59,6 +59,14 @@ def initialize_database():
           role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('administrator', 'moderator', 'member')),
           PRIMARY KEY (community_id, user_id)
         );
+        CREATE TABLE IF NOT EXISTS community_bans (
+          community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          banned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          role_at_ban TEXT NOT NULL CHECK (role_at_ban IN ('administrator', 'moderator', 'member')),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (community_id, user_id)
+        );
         CREATE TABLE IF NOT EXISTS channels (
           id INTEGER PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
           name TEXT NOT NULL, created_at TEXT NOT NULL,

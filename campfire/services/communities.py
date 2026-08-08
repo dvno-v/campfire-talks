@@ -2,6 +2,8 @@
 
 import time
 
+from ..database import utc_now
+
 
 ASSIGNABLE_ROLES = frozenset({"administrator", "moderator", "member"})
 ROLE_RANK = {"member": 0, "moderator": 1, "administrator": 2, "owner": 3}
@@ -89,6 +91,94 @@ def set_member_role(database, community_id, member_id, actor_id, role):
         return False
     member = database.execute("SELECT id,username FROM users WHERE id=?", (member_id,)).fetchone()
     return dict(member) | {"role": role}
+
+
+def remove_member(database, community_id, member_id, actor_id, ban=False, created_at=None):
+    """Kick or ban a lower-ranked member and clear their community-local state.
+
+    Returns ``(status, member)``. Keeping the reason as a small status value
+    lets the HTTP layer decide which distinctions are safe to reveal.
+    """
+    # Acquire SQLite's writer lock before reading either role. Otherwise a
+    # simultaneous promotion could land between authorization and deletion.
+    database.execute("UPDATE memberships SET role=role WHERE community_id=? AND user_id=?",
+                     (community_id, actor_id))
+    actor_role = community_role(database, community_id, actor_id)
+    if actor_role is None:
+        return "community_not_found", None
+    if ROLE_RANK[actor_role] < ROLE_RANK["moderator"]:
+        return "forbidden", None
+    target = database.execute("""
+      SELECT u.id,u.username,CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END role
+      FROM memberships m JOIN users u ON u.id=m.user_id
+      JOIN communities c ON c.id=m.community_id
+      WHERE m.community_id=? AND m.user_id=?
+    """, (community_id, member_id)).fetchone()
+    if not target:
+        return "member_not_found", None
+    if actor_id == member_id or ROLE_RANK[actor_role] <= ROLE_RANK[target["role"]]:
+        return "forbidden", None
+
+    member = dict(target)
+    if ban:
+        database.execute("""INSERT INTO community_bans
+          (community_id,user_id,banned_by,role_at_ban,created_at) VALUES(?,?,?,?,?)
+          ON CONFLICT(community_id,user_id) DO UPDATE SET
+            banned_by=excluded.banned_by,role_at_ban=excluded.role_at_ban,created_at=excluded.created_at
+        """, (community_id, member_id, actor_id, target["role"], created_at or utc_now()))
+    database.execute("""DELETE FROM channel_reads WHERE user_id=? AND channel_id IN
+                         (SELECT id FROM channels WHERE community_id=?)""",
+                     (member_id, community_id))
+    database.execute("""DELETE FROM channel_notifications WHERE user_id=? AND channel_id IN
+                         (SELECT id FROM channels WHERE community_id=?)""",
+                     (member_id, community_id))
+    database.execute("DELETE FROM memberships WHERE community_id=? AND user_id=?",
+                     (community_id, member_id))
+    return "ok", member
+
+
+def is_banned(database, community_id, user_id):
+    """True when an account is blocked from joining this community."""
+    return database.execute(
+        "SELECT 1 FROM community_bans WHERE community_id=? AND user_id=?",
+        (community_id, user_id),
+    ).fetchone() is not None
+
+
+def list_community_bans(database, community_id, actor_id):
+    """Return ban metadata to moderators and above, or None otherwise."""
+    if not has_role(database, community_id, actor_id, "moderator"):
+        return None
+    rows = database.execute("""
+      SELECT b.user_id,u.username,b.role_at_ban,b.created_at,
+        b.banned_by,moderator.username banned_by_username
+      FROM community_bans b JOIN users u ON u.id=b.user_id
+      LEFT JOIN users moderator ON moderator.id=b.banned_by
+      WHERE b.community_id=? ORDER BY u.username COLLATE NOCASE
+    """, (community_id,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def unban_member(database, community_id, member_id, actor_id):
+    """Remove a lower-ranked account's ban using its role when banned."""
+    database.execute("UPDATE memberships SET role=role WHERE community_id=? AND user_id=?",
+                     (community_id, actor_id))
+    actor_role = community_role(database, community_id, actor_id)
+    if actor_role is None:
+        return "community_not_found"
+    if ROLE_RANK[actor_role] < ROLE_RANK["moderator"]:
+        return "forbidden"
+    ban = database.execute(
+        "SELECT role_at_ban FROM community_bans WHERE community_id=? AND user_id=?",
+        (community_id, member_id),
+    ).fetchone()
+    if not ban:
+        return "ban_not_found"
+    if ROLE_RANK[actor_role] <= ROLE_RANK[ban["role_at_ban"]]:
+        return "forbidden"
+    database.execute("DELETE FROM community_bans WHERE community_id=? AND user_id=?",
+                     (community_id, member_id))
+    return "ok"
 
 
 def list_active_invites(database, community_id, actor_id, timestamp=None):

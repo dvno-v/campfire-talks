@@ -10,6 +10,7 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Username and password hash | Authentication | Until manually deleted |
 | Session-token digest and user link | Staying signed in | 30 days; expired rows are removed at startup |
 | Communities, memberships, and roles | Authorization | Until manually deleted |
+| Community bans (account, prior role, moderator, time) | Preventing invite re-entry | Until unbanned or the account/community is deleted |
 | Channel messages | Conversation history | Indefinite, until deleted by the author or a community moderator |
 | Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or a community moderator |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
@@ -25,6 +26,14 @@ and community role. Non-owner roles are stored on the membership; the owner
 role is derived from the community's existing owner link. A role change
 overwrites the previous value and remains in SQLite and its backups until that
 membership is deleted; no role-change history or timestamp is kept.
+
+A kick deletes the membership and that account's read markers and notification
+overrides for the community. It does not delete messages or attachments the
+account previously shared, because those remain part of the other members'
+conversation history. A ban performs the same deletion and stores the banned
+account, its role at that moment, the moderator account, and a timestamp. No
+reason, note, IP address, device identifier, or ban expiry is stored. Unbanning
+deletes the ban row immediately; older backups retain it until rotated.
 
 Presence is derived from open event streams and held only in memory. Campfire
 records no last-seen time, no session history, and no connection log, so there
