@@ -8,11 +8,13 @@ and the browser receives live messages over Server-Sent Events.
 
 - Account registration, login, and cookie-based sessions
 - Invite-only registration after the first account
-- Owner-only active invite management and immediate revocation
+- Administrator-controlled active invite management and immediate revocation
 - Communities and text channels
-- Authorized member lists with owner indicators and online presence
+- Authorized member lists with roles and online presence
+- Owner-assigned administrators and moderators; administrators manage channels
+  and invites, while moderators can remove messages
 - Persistent messages, editable by their author and removable by the author or
-  community owner
+  a community moderator
 - Authorized PNG, JPEG, GIF, and WebP sharing (8 MiB default limit), stored
   with EXIF and other metadata removed
 - Live message delivery with automatic reconnect
@@ -45,8 +47,8 @@ python3 -m unittest discover -s tests -v
 
 ## Near-term roadmap
 
-1. Roles and moderation beyond deletion
-2. Direct messages and per-community retention settings
+1. Kick/ban, channel permissions, slow mode, and upload controls
+2. Account/session controls and per-community retention settings
 3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
 4. Voice rooms through a dedicated WebRTC SFU
 

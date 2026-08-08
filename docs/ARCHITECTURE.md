@@ -56,13 +56,14 @@ separate self-hosted SFU.
 ## Next structural step
 
 `campfire/http.py` intentionally remains the composition point. Community
-membership, message ownership, and per-account reading state are the extracted
-domain services so far; account workflows will follow as role management
-arrives. `services/messages.py` decides who may edit or delete and
-`services/notifications.py` decides what each account has read and wants told,
-while the HTTP layer keeps the decision about which status code reveals what.
-Those service functions should accept an explicit database connection and
-actor identity, making authorization testable without opening a socket.
+membership and roles, message ownership, and per-account reading state are the
+extracted domain services so far; account and session lifecycle workflows will
+follow. `services/communities.py` resolves the privilege ladder,
+`services/messages.py` decides who may edit or delete, and
+`services/notifications.py` decides what each account has read and wants told.
+The HTTP layer keeps the decision about which status code reveals what. Those
+service functions accept an explicit database connection and actor identity,
+making authorization testable without opening a socket.
 
 Before supporting multiple Campfire processes, the in-memory event broker and
 rate limiter must be replaced with shared infrastructure. That complexity is

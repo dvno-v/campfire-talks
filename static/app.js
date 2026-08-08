@@ -42,6 +42,7 @@ async function enterApp() {
     if (event.type === 'stream.reset') { refreshUnread(); return resyncChannel(); }
     if (event.type.startsWith('presence.')) return applyPresence(event);
     if (event.type === 'member.joined') return applyMemberJoined(event);
+    if (event.type === 'member.updated') return applyMemberUpdated(event);
     if (event.type === 'channel.created') return applyChannelCreated(event);
     if (event.type === 'message.created') countUnread(event);
     if (event.type === 'message.deleted') discountUnread(event);
@@ -183,17 +184,30 @@ async function loadMembers(communityId) {
   catch(error) { if(state.community?.id===communityId) $('#member-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; }
 }
 
+function memberRoleControl(member) {
+  if (member.role === 'owner') return '<span class="member-role">OWNER</span>';
+  if (currentCommunityRole() !== 'owner') return member.role === 'member' ? '' : `<span class="member-role">${escapeHTML(member.role.toUpperCase())}</span>`;
+  return `<select class="member-role-select" data-member-role="${Number(member.id)}" aria-label="Role for ${escapeHTML(member.username)}"><option value="administrator">Administrator</option><option value="moderator">Moderator</option><option value="member">Member</option></select>`;
+}
+
 function memberRow(member) {
-  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${member.role==='owner'?'<span class="member-role">OWNER</span>':''}</div></article>`;
+  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${memberRoleControl(member)}</div></article>`;
 }
 
 function renderMembers() {
   $('#member-count').textContent = state.members.length;
-  $('#invite-friend').classList.toggle('hidden', !isOwner(state.user?.id));
+  const manages = ['owner', 'administrator'].includes(currentCommunityRole());
+  $('#invite-friend').classList.toggle('hidden', !manages);
+  $('#add-channel').classList.toggle('hidden', !manages);
   if (!state.members.length) { $('#member-list').innerHTML = '<p class="member-empty">Loading members…</p>'; return; }
   const groups = [['ONLINE', state.members.filter(m => state.online.has(m.id))], ['OFFLINE', state.members.filter(m => !state.online.has(m.id))]];
   $('#member-list').innerHTML = groups.filter(([, members]) => members.length)
     .map(([label, members]) => `<div class="member-group">${label} — ${members.length}</div>${members.map(memberRow).join('')}`).join('');
+  document.querySelectorAll('[data-member-role]').forEach(select => {
+    const member = state.members.find(entry => entry.id === Number(select.dataset.memberRole));
+    select.value = member.role;
+    select.onchange = () => { select.disabled = true; updateMemberRole(member, select.value); };
+  });
 }
 
 function applyPresence(event) {
@@ -202,9 +216,10 @@ function applyPresence(event) {
   if (state.members.some(member => member.id === userId)) renderMembers();
 }
 
-// Owner first, then by name, matching the order the server returns.
+// Privileged roles first, then by name, matching the order the server returns.
 function sortMembers(members) {
-  return members.sort((a, b) => (a.role === 'owner' ? 0 : 1) - (b.role === 'owner' ? 0 : 1)
+  const rank = { owner: 0, administrator: 1, moderator: 2, member: 3 };
+  return members.sort((a, b) => rank[a.role] - rank[b.role]
     || a.username.localeCompare(b.username, undefined, { sensitivity: 'base' }));
 }
 
@@ -213,6 +228,25 @@ function applyMemberJoined(event) {
   if (state.members.some(member => member.id === event.member.id)) return;
   state.members = sortMembers([...state.members, event.member]);
   renderMembers();
+}
+
+function applyMemberUpdated(event) {
+  const community = state.communities.find(entry => entry.id === Number(event.community_id));
+  if (community && event.member.id === state.user?.id) community.role = event.member.role;
+  if (event.community_id !== state.community?.id) return;
+  const existing = state.members.find(member => member.id === event.member.id);
+  if (!existing) return loadMembers(event.community_id);
+  Object.assign(existing, event.member);
+  state.members = sortMembers(state.members);
+  renderMembers(); refreshMessages();
+}
+
+async function updateMemberRole(member, role) {
+  try {
+    const updated = await api(`/api/communities/${state.community.id}/members/${Number(member.id)}`, {
+      method: 'PATCH', body: JSON.stringify({ role }) });
+    applyMemberUpdated({ type: 'member.updated', community_id: state.community.id, member: updated });
+  } catch (error) { alert(error.message); renderMembers(); }
 }
 
 // Re-reads the channel outright: a gap can hide edits and deletions too, not
@@ -226,8 +260,10 @@ function applyChannelCreated(event) {
   if (community.id === state.community?.id) renderChannels();
 }
 
-function isOwner(userId) { return state.members.some(member => member.id===Number(userId) && member.role==='owner'); }
-// Owner badges and delete rights both depend on the member list, which arrives after the first messages.
+function currentCommunityRole() { return state.community?.role || state.members.find(member => member.id === state.user?.id)?.role || 'member'; }
+function mayModerate() { return ['owner', 'administrator', 'moderator'].includes(currentCommunityRole()); }
+function roleBadge(userId) { const role=state.members.find(member=>member.id===Number(userId))?.role; return role && role!=='member' ? `<span class="owner-indicator">${escapeHTML(role.toUpperCase())}</span>` : ''; }
+// Author role badges depend on the member list, which arrives after the first messages.
 function refreshMessages() { document.querySelectorAll('.message-row').forEach(row => { const message=state.messages.get(Number(row.dataset.messageId)); if(message) renderInto(row, message); }); }
 
 async function selectChannel(channel) {
@@ -251,7 +287,7 @@ async function selectChannel(channel) {
 
 function messageActions(message) {
   const authored = message.author_id === state.user?.id;
-  if (!authored && !isOwner(state.user?.id)) return '';
+  if (!authored && !mayModerate()) return '';
   const edit = authored && !message.attachment ? `<button type="button" data-edit-message title="Edit message">Edit</button>` : '';
   return `<div class="message-actions">${edit}<button type="button" data-delete-message title="Delete message">Delete</button></div>`;
 }
@@ -260,7 +296,7 @@ function messageMarkup(message) {
   const date = new Date(message.created_at);
   const attachment = message.attachment ? `<a class="message-attachment" href="/api/attachments/${Number(message.attachment.id)}" target="_blank" rel="noopener"><img src="/api/attachments/${Number(message.attachment.id)}" alt="${escapeHTML(message.attachment.name)}" loading="lazy"><span>${escapeHTML(message.attachment.name)} · ${formatBytes(message.attachment.byte_size)}</span></a>` : '';
   const edited = message.edited_at ? `<span class="message-edited" title="Edited ${escapeHTML(new Date(message.edited_at).toLocaleString())}">(edited)</span>` : '';
-  return `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${isOwner(message.author_id)?'<span class="owner-indicator">OWNER</span>':''}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time>${edited}</div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>${messageActions(message)}`;
+  return `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${roleBadge(message.author_id)}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time>${edited}</div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>${messageActions(message)}`;
 }
 
 function renderInto(row, message) {

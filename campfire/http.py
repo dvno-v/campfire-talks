@@ -28,7 +28,8 @@ from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
-from .services.communities import is_member, list_active_invites, list_community_members, shares_community
+from .services.communities import ASSIGNABLE_ROLES, has_role, is_member, list_active_invites
+from .services.communities import list_community_members, set_member_role, shares_community
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
@@ -224,6 +225,8 @@ class App(BaseHTTPRequestHandler):
                 return self.set_notification_default()
             if path.startswith("/api/messages/"):
                 return self.edit_message(path)
+            if path.startswith("/api/communities/") and "/members/" in path:
+                return self.update_member_role(path)
             if path.startswith("/api/channels/") and path.endswith("/notifications"):
                 return self.set_channel_notifications(path)
         except InvalidBody:
@@ -255,12 +258,14 @@ class App(BaseHTTPRequestHandler):
                                          (invitation["id"],))
                     if updated.rowcount != 1:
                         raise sqlite3.IntegrityError("invite exhausted")
-                    db.execute("INSERT INTO memberships VALUES(?,?)", (invitation["community_id"], user_id))
+                    db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                               (invitation["community_id"], user_id))
                     mark_community_read(db, invitation["community_id"], user_id)
                 else:
                     community = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                            (f"{username}'s place", user_id, utc_now())).lastrowid
-                    db.execute("INSERT INTO memberships VALUES(?,?)", (community, user_id))
+                    db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                               (community, user_id))
                     db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                (community, "general", utc_now()))
         except sqlite3.IntegrityError:
@@ -316,7 +321,8 @@ class App(BaseHTTPRequestHandler):
             return
         with connect() as db:
             rows = db.execute("""
-              SELECT c.id community_id,c.name community_name,ch.id channel_id,ch.name channel_name
+              SELECT c.id community_id,c.name community_name,ch.id channel_id,ch.name channel_name,
+                CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END community_role
               FROM communities c JOIN memberships m ON m.community_id=c.id
               JOIN channels ch ON ch.community_id=c.id WHERE m.user_id=?
               ORDER BY c.id,ch.id
@@ -326,7 +332,8 @@ class App(BaseHTTPRequestHandler):
         communities = {}
         for row in rows:
             community = communities.setdefault(row["community_id"], {
-                "id": row["community_id"], "name": row["community_name"], "channels": []})
+                "id": row["community_id"], "name": row["community_name"],
+                "role": row["community_role"], "channels": []})
             community["channels"].append({"id": row["channel_id"], "name": row["channel_name"]}
                                          | self.channel_state_payload(states.get(row["channel_id"])))
         self.send_json({"user": user, "communities": list(communities.values()),
@@ -428,10 +435,12 @@ class App(BaseHTTPRequestHandler):
         with connect() as db:
             community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                       (name, user["id"], utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, user["id"]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                       (community_id, user["id"]))
             channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                     (community_id, "general", utc_now())).lastrowid
-        self.send_json({"id": community_id, "name": name, "channels": [{"id": channel_id, "name": "general"}]}, HTTPStatus.CREATED)
+        self.send_json({"id": community_id, "name": name, "role": "owner",
+                        "channels": [{"id": channel_id, "name": "general"}]}, HTTPStatus.CREATED)
 
     def community_members(self, path):
         user = self.require_user()
@@ -458,8 +467,43 @@ class App(BaseHTTPRequestHandler):
         with connect() as database:
             invitations = list_active_invites(database, community_id, user["id"])
         if invitations is None:
-            return self.error(HTTPStatus.FORBIDDEN, "Only the community owner can manage invites")
+            return self.error(HTTPStatus.FORBIDDEN, "Only community administrators can manage invites")
         self.send_json({"invites": invitations})
+
+    def update_member_role(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            parts = path.split("/")
+            community_id, member_id = int(parts[3]), int(parts[5])
+            if len(parts) != 6 or parts[4] != "members":
+                raise ValueError
+        except (ValueError, IndexError):
+            self.close_connection = True
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community member")
+        role = str(self.json_body().get("role", ""))
+        if role not in ASSIGNABLE_ROLES:
+            return self.error(HTTPStatus.BAD_REQUEST,
+                              "Role must be 'administrator', 'moderator', or 'member'")
+        with connect() as database:
+            actor_role = database.execute("""
+              SELECT CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END role
+              FROM memberships m JOIN communities c ON c.id=m.community_id
+              WHERE m.community_id=? AND m.user_id=?
+            """, (community_id, user["id"])).fetchone()
+            if not actor_role:
+                return self.error(HTTPStatus.NOT_FOUND, "Community not found")
+            if actor_role["role"] != "owner":
+                return self.error(HTTPStatus.FORBIDDEN, "Only the community owner can change roles")
+            updated = set_member_role(database, community_id, member_id, user["id"], role)
+        if not updated:
+            return self.error(HTTPStatus.CONFLICT if member_id == user["id"] else HTTPStatus.NOT_FOUND,
+                              "Community ownership cannot be changed" if member_id == user["id"]
+                              else "Member not found")
+        updated["online"] = member_id in BROKER.online_user_ids()
+        BROKER.publish({"type": "member.updated", "community_id": community_id, "member": updated})
+        self.send_json(updated)
 
     def create_channel(self):
         user = self.require_user()
@@ -472,9 +516,8 @@ class App(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
         with connect() as db:
-            owns = db.execute("SELECT 1 FROM communities WHERE id=? AND owner_id=?", (community_id, user["id"])).fetchone()
-            if not owns:
-                return self.error(HTTPStatus.FORBIDDEN, "Only the community owner can add channels")
+            if not has_role(db, community_id, user["id"], "administrator"):
+                return self.error(HTTPStatus.FORBIDDEN, "Only community administrators can add channels")
             if not 2 <= len(name) <= 30:
                 return self.error(HTTPStatus.BAD_REQUEST, "Channel name must be 2–30 characters")
             try:
@@ -500,10 +543,8 @@ class App(BaseHTTPRequestHandler):
         token = secrets.token_urlsafe(24)
         expires_at = int(time.time()) + lifetime_hours * 3600
         with connect() as db:
-            owns = db.execute("SELECT 1 FROM communities WHERE id=? AND owner_id=?",
-                              (community_id, user["id"])).fetchone()
-            if not owns:
-                return self.error(HTTPStatus.FORBIDDEN, "Only the community owner can create invites")
+            if not has_role(db, community_id, user["id"], "administrator"):
+                return self.error(HTTPStatus.FORBIDDEN, "Only community administrators can create invites")
             db.execute("""INSERT INTO invitations
               (community_id,created_by,token_hash,expires_at,max_uses,created_at)
               VALUES(?,?,?,?,?,?)""",
@@ -542,7 +583,8 @@ class App(BaseHTTPRequestHandler):
                                  (invitation["id"],))
             if updated.rowcount != 1:
                 return self.error(HTTPStatus.CONFLICT, "Invite is fully used")
-            db.execute("INSERT INTO memberships VALUES(?,?)", (invitation["community_id"], user["id"]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                       (invitation["community_id"], user["id"]))
             mark_community_read(db, invitation["community_id"], user["id"])
         self.announce_member(invitation["community_id"], user["id"], user["username"])
         self.send_json({"id": invitation["community_id"], "name": invitation["community_name"]},
@@ -641,7 +683,7 @@ class App(BaseHTTPRequestHandler):
                 return self.error(HTTPStatus.NOT_FOUND, "Message not found")
             if not may_delete(message):
                 return self.error(HTTPStatus.FORBIDDEN,
-                                  "Only the author or the community owner can delete a message")
+                                  "Only the author or a community moderator can delete a message")
             channel_id = message["channel_id"]
             orphaned_file = remove_message(db, message)
         if orphaned_file:

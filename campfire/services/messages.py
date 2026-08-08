@@ -4,8 +4,8 @@ Two distinct rights govern an existing message:
 
 - Authorship allows editing. Nobody may rewrite words attributed to another
   person, so this right is never delegated, not even to a community owner.
-- Authorship *or* community ownership allows deletion, because removing
-  content is the moderation action an owner needs.
+- Authorship or a moderator-or-higher community role allows deletion, because
+  removing content is a moderation action.
 
 Both require current membership of the message's community. Callers who are not
 members cannot distinguish a message they may not touch from one that does not
@@ -20,7 +20,7 @@ def visible_message(database, message_id, actor_id):
              m.author_id,u.username,
              a.original_name,a.mime_type,a.byte_size,a.storage_name,
              m.author_id=? AS is_author,
-             c.owner_id=? AS is_community_owner
+             (c.owner_id=? OR mem.role IN ('administrator','moderator')) AS may_moderate
       FROM messages m
       JOIN users u ON u.id=m.author_id
       JOIN channels ch ON ch.id=m.channel_id
@@ -36,7 +36,7 @@ def may_edit(message):
 
 
 def may_delete(message):
-    return bool(message["is_author"] or message["is_community_owner"])
+    return bool(message["is_author"] or message["may_moderate"])
 
 
 def apply_edit(database, message_id, body, edited_at):

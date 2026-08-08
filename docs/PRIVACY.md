@@ -9,9 +9,9 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | --- | --- | --- |
 | Username and password hash | Authentication | Until manually deleted |
 | Session-token digest and user link | Staying signed in | 30 days; expired rows are removed at startup |
-| Communities and memberships | Authorization | Until manually deleted |
-| Channel messages | Conversation history | Indefinite, until deleted by the author or community owner |
-| Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or community owner |
+| Communities, memberships, and roles | Authorization | Until manually deleted |
+| Channel messages | Conversation history | Indefinite, until deleted by the author or a community moderator |
+| Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or a community moderator |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
@@ -21,8 +21,10 @@ IP addresses. Authentication rate-limit state exists only in memory for five
 minutes.
 
 Members of the same community can see one another's username, internal user ID,
-and whether a person owns that community. The member-list feature adds no new
-persistent data beyond existing accounts and memberships.
+and community role. Non-owner roles are stored on the membership; the owner
+role is derived from the community's existing owner link. A role change
+overwrites the previous value and remains in SQLite and its backups until that
+membership is deleted; no role-change history or timestamp is kept.
 
 Presence is derived from open event streams and held only in memory. Campfire
 records no last-seen time, no session history, and no connection log, so there
@@ -50,9 +52,9 @@ the button that asks for it, never on load and never as a side effect of
 signing in. Until you do, Campfire says so in the notification settings rather
 than leaving you to wonder why nothing appears.
 
-Only a community owner can list its active invite metadata. Campfire cannot
-display a previously created raw code because only its digest is retained;
-revocation deletes that digest and its usage metadata immediately.
+Only a community owner or administrator can list its active invite metadata.
+Campfire cannot display a previously created raw code because only its digest
+is retained; revocation deletes that digest and its usage metadata immediately.
 
 Deleting a message removes its row immediately. When that message carried an
 image, the attachment record and the stored file are removed with it, so the

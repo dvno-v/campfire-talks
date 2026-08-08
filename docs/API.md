@@ -46,7 +46,8 @@ Returns `{"user": null}` when signed out or the current public user object.
 ### `GET /api/bootstrap`
 
 Returns the signed-in user and every community/channel they may access. Each
-channel also carries the caller's own reading state:
+community carries the caller's effective `role`; each channel also carries the
+caller's own reading state:
 
 | Field | Meaning |
 | --- | --- |
@@ -61,14 +62,25 @@ default (`all` unless it has been changed).
 
 ### `GET /api/communities/{community_id}/members`
 
-Returns public member objects containing `id`, `username`, `online`, and either
-the `owner` or `member` role. The owner is sorted first. Callers who are not
-current members receive `404`, which avoids confirming whether a private
-community exists.
+Returns public member objects containing `id`, `username`, `online`, and an
+`owner`, `administrator`, `moderator`, or `member` role. Privileged roles are
+sorted first. Callers who are not current members receive `404`, which avoids
+confirming whether a private community exists.
 
 `online` is true while that account holds at least one open `/api/events`
 stream. It is computed in memory at request time and never stored, so it resets
 to false for everyone when the process restarts.
+
+### `PATCH /api/communities/{community_id}/members/{user_id}`
+
+```json
+{"role": "moderator"}
+```
+
+The community owner may assign `administrator`, `moderator`, or `member` to a
+current non-owner member. Members cannot promote themselves. The owner role is
+derived from community ownership and cannot be assigned or removed through
+this endpoint. Outsiders receive `404`; non-owner members receive `403`.
 
 ### `POST /api/communities`
 
@@ -84,8 +96,8 @@ Creates an owned community with a `general` channel.
 {"community_id": 1, "name": "memes"}
 ```
 
-Only the community owner may create a channel. Members of that community are
-told over `/api/events`, so the channel appears without a reload.
+Community owners and administrators may create a channel. Members of that
+community are told over `/api/events`, so the channel appears without a reload.
 
 ## Invitations
 
@@ -95,23 +107,23 @@ told over `/api/events`, so the channel appears without a reload.
 {"community_id": 1, "max_uses": 10, "lifetime_hours": 24}
 ```
 
-Only the owner may create one. Usage is clamped to 1–25 and lifetime to 1–168
-hours. The response includes the raw code exactly once; share it through a
-trusted side channel. Campfire stores only its digest. Avoid putting invite
-codes in URLs, screenshots, or long-lived chat histories.
+Only owners and administrators may create one. Usage is clamped to 1–25 and
+lifetime to 1–168 hours. The response includes the raw code exactly once; share
+it through a trusted side channel. Campfire stores only its digest. Avoid
+putting invite codes in URLs, screenshots, or long-lived chat histories.
 
 ### `GET /api/communities/{community_id}/invites`
 
-Returns active invite metadata to the community owner: internal invite ID,
-creator, creation and expiry times, use count, and maximum uses. Raw invite
-codes are never returned because Campfire stores only their digests. Expired and
-fully used invitations are omitted. Other members receive `403`.
+Returns active invite metadata to community owners and administrators: internal
+invite ID, creator, creation and expiry times, use count, and maximum uses. Raw
+invite codes are never returned because Campfire stores only their digests.
+Expired and fully used invitations are omitted. Other members receive `403`.
 
 ### `DELETE /api/invites/{invite_id}`
 
-Immediately deletes an invitation when requested by its community owner. Every
-outstanding copy of the code becomes invalid on the next use. Missing invites
-and invites owned by another user both return `404`.
+Immediately deletes an invitation when requested by an owner or administrator
+of its community. Every outstanding copy of the code becomes invalid on the
+next use. Missing or unauthorized invites both return `404`.
 
 ### `POST /api/invites/join`
 
@@ -153,10 +165,11 @@ is the updated message with `edited_at` set. Messages carrying an image return
 
 ### `DELETE /api/messages/{message_id}`
 
-Deletes a message when requested by its author or by the owner of its
-community. Any attachment it carries is removed from the database and from disk
-in the same operation. Members without either right receive `403`; users outside
-the community receive `404` rather than learning that the message exists.
+Deletes a message when requested by its author or by a moderator,
+administrator, or owner of its community. Any attachment it carries is removed
+from the database and from disk in the same operation. Members without either
+right receive `403`; users outside the community receive `404` rather than
+learning that the message exists.
 
 ### `POST /api/channels/{channel_id}/uploads`
 
@@ -180,8 +193,8 @@ still a member of its channel’s community. Responses use `no-store` and
 
 ### `GET /api/events`
 
-Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
-`channel_id`:
+Opens a Server-Sent Events stream. Each `data` event carries a `type` and the
+resource identifier described below:
 
 | `type` | Payload |
 | --- | --- |
@@ -191,6 +204,7 @@ Opens a Server-Sent Events stream. Each `data` event carries a `type` and a
 | `presence.online` | `user_id`, sent when that account opens its first stream |
 | `presence.offline` | `user_id`, sent when its last stream closes |
 | `member.joined` | `community_id` and the new `member` object |
+| `member.updated` | `community_id` and the member's new public role object |
 | `channel.created` | `community_id`, `id`, and `name` |
 | `stream.reset` | nothing; the client must re-read the channel it is viewing |
 

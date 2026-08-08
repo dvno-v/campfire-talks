@@ -56,6 +56,7 @@ def initialize_database():
         CREATE TABLE IF NOT EXISTS memberships (
           community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('administrator', 'moderator', 'member')),
           PRIMARY KEY (community_id, user_id)
         );
         CREATE TABLE IF NOT EXISTS channels (
@@ -112,6 +113,10 @@ def initialize_database():
             database.execute("ALTER TABLE messages ADD COLUMN attachment_id INTEGER REFERENCES attachments(id)")
         if "edited_at" not in message_columns:
             database.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
+        membership_columns = {row[1] for row in database.execute("PRAGMA table_info(memberships)")}
+        if "role" not in membership_columns:
+            database.execute("""ALTER TABLE memberships ADD COLUMN role TEXT NOT NULL DEFAULT 'member'
+                                CHECK (role IN ('administrator', 'moderator', 'member'))""")
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))

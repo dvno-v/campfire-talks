@@ -139,6 +139,18 @@
   margin-top: 2px;
 }
 
+.member-role-select {
+  background: #17181c;
+  border: 1px solid #ffffff18;
+  border-radius: 5px;
+  color: var(--muted);
+  display: block;
+  font-size: 10px;
+  margin-top: 4px;
+  max-width: 100%;
+  padding: 2px 4px;
+}
+
 .owner-indicator {
   border: 1px solid #ff9a6255;
   border-radius: 4px;

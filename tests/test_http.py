@@ -45,7 +45,8 @@ class HTTPTests(unittest.TestCase):
                                       ("http_owner", "unused", database.utc_now())).lastrowid
             cls.community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                           ("HTTP Tests", cls.owner_id, database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (cls.community_id, cls.owner_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                       (cls.community_id, cls.owner_id))
             cls.channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                         (cls.community_id, "general", database.utc_now())).lastrowid
             cls.owner_session = secrets.token_urlsafe(32)
@@ -91,7 +92,8 @@ class HTTPTests(unittest.TestCase):
             user_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
                                  (username, "unused", database.utc_now())).lastrowid
             if member:
-                db.execute("INSERT INTO memberships VALUES(?,?)", (self.community_id, user_id))
+                db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)",
+                           (self.community_id, user_id))
             db.execute("INSERT INTO sessions VALUES(?,?,?)",
                        (security.session_hash(token), user_id, int(time.time()) + 600))
         return token
@@ -220,6 +222,65 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         status, _, _ = self.request("PATCH", f"/api/messages/{message['id']}", {"body": "back"}, cookie=author)
         self.assertEqual(status, 404)
+
+    def test_owner_assigns_roles_and_privileges_take_effect_immediately(self):
+        candidate = self.signed_in_user("http_role_candidate")
+        candidate_id = self.user_id_for("http_role_candidate")
+        outsider = self.signed_in_user("http_role_outsider", member=False)
+
+        status, _, _ = self.request(
+            "PATCH", f"/api/communities/{self.community_id}/members/{candidate_id}",
+            {"role": "moderator"}, cookie=candidate)
+        self.assertEqual(status, 403, "members must not promote themselves")
+        status, _, _ = self.request(
+            "PATCH", f"/api/communities/{self.community_id}/members/{candidate_id}",
+            {"role": "moderator"}, cookie=outsider)
+        self.assertEqual(status, 404, "outsiders must not learn whether a private community exists")
+        status, _, _ = self.request(
+            "PATCH", f"/api/communities/{self.community_id}/members/{candidate_id}",
+            {"role": "owner"}, cookie=self.owner_session)
+        self.assertEqual(status, 400, "ownership is not an assignable role")
+
+        with self.event_stream(candidate) as stream:
+            time.sleep(0.3)
+            status, updated, _ = self.request(
+                "PATCH", f"/api/communities/{self.community_id}/members/{candidate_id}",
+                {"role": "moderator"}, cookie=self.owner_session)
+            event = self.await_event(stream, lambda item: item.get("type") == "member.updated")
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["role"], "moderator")
+        self.assertIsNotNone(event)
+        self.assertEqual(event["member"]["id"], candidate_id)
+
+        author = self.signed_in_user("http_role_author")
+        message = self.post_message(author, "moderated by role")
+        status, _, _ = self.request("DELETE", f"/api/messages/{message['id']}", cookie=candidate)
+        self.assertEqual(status, 200, "moderators should be able to remove another member's message")
+        status, _, _ = self.request("POST", "/api/channels",
+                                    {"community_id": self.community_id, "name": "moderator-denied"},
+                                    cookie=candidate)
+        self.assertEqual(status, 403)
+
+        self.request("PATCH", f"/api/communities/{self.community_id}/members/{candidate_id}",
+                     {"role": "administrator"}, cookie=self.owner_session)
+        status, _, _ = self.request("POST", "/api/channels",
+                                    {"community_id": self.community_id, "name": "admin-created"},
+                                    cookie=candidate)
+        self.assertEqual(status, 201)
+        status, _, _ = self.request("POST", "/api/invites",
+                                    {"community_id": self.community_id}, cookie=candidate)
+        self.assertEqual(status, 201)
+        status, invitations, _ = self.request(
+            "GET", f"/api/communities/{self.community_id}/invites", cookie=candidate)
+        self.assertEqual(status, 200)
+        own_invite = next(invite for invite in invitations["invites"]
+                          if invite["creator_id"] == candidate_id)
+        status, _, _ = self.request("DELETE", f"/api/invites/{own_invite['id']}", cookie=candidate)
+        self.assertEqual(status, 200)
+
+        _, bootstrap, _ = self.request("GET", "/api/bootstrap", cookie=candidate)
+        community = next(item for item in bootstrap["communities"] if item["id"] == self.community_id)
+        self.assertEqual(community["role"], "administrator")
 
     def test_bystanders_cannot_delete_and_outsiders_cannot_see(self):
         author = self.signed_in_user("http_delete_author")

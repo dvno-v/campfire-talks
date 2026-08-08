@@ -19,8 +19,9 @@ encrypted. A compromised host, browser, or administrator can read them.
   iterations. Existing hashes from the first prototype are upgraded on login.
 - After the initial owner account, registration requires a random, expiring
   invite. Only a SHA-256 digest of each invite is stored.
-- Active invite metadata and revocation are owner-only. Revocation deletes the
-  stored digest, invalidating previously copied codes without retaining them.
+- Active invite metadata and revocation require an administrator-or-higher
+  community role. Revocation deletes the stored digest, invalidating previously
+  copied codes without retaining them.
 - Authentication attempts are limited in memory to eight per client and
   operation scope per five-minute window. Addresses are not persisted. Behind a
   reverse proxy set `CAMPFIRE_TRUSTED_PROXIES`, or every user shares one bucket
@@ -51,9 +52,15 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Arrival and channel-creation events are delivered only to members of the
   community they concern, re-checked per event rather than trusted from the
   moment the stream opened.
-- Editing a message requires authorship; deleting one requires authorship or
-  ownership of its community. Ownership deliberately does not grant the right to
-  rewrite another member's words, only to remove them. Non-members receive
+- Community roles form an explicit privilege ladder: members can chat,
+  moderators can remove messages, administrators can also manage channels and
+  invites, and owners can additionally assign roles. Ownership is derived from
+  the community and cannot be reassigned through the role endpoint. Every role
+  change verifies current ownership server-side; the browser's controls are not
+  trusted.
+- Editing a message requires authorship; deleting one requires authorship or a
+  moderator-or-higher role. Elevated roles deliberately do not grant the right
+  to rewrite another member's words, only to remove them. Non-members receive
   `404` rather than a denial that would confirm the message exists.
 - Community member lists verify the requesting actor's current membership and
   return `404` to outsiders rather than revealing whether a community exists.
@@ -87,8 +94,9 @@ standard library also recommends salted, tunably slow password derivation:
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
 - There is no multi-factor authentication, password reset, session management
-  screen, account deletion, invisible-mode preference, or moderator role model. Deletion is currently the
-  only moderation action, and only the community owner has it.
+  screen, account deletion, or invisible-mode preference. Message deletion is
+  currently the only moderator action; kick/ban and channel-specific
+  permissions are not implemented yet.
 - Messages are not end-to-end encrypted and are retained until someone deletes
   them. Deletion does not reach backups taken beforehand.
 - Voice and screen sharing are not implemented yet.

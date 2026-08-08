@@ -12,7 +12,8 @@ temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
 from campfire import database, realtime, security, uploads
-from campfire.services.communities import list_active_invites, list_community_members, revoke_invite
+from campfire.services.communities import community_role, has_role, list_active_invites
+from campfire.services.communities import list_community_members, revoke_invite, set_member_role
 from campfire.services.communities import shares_community
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
@@ -72,7 +73,36 @@ class CampfireTests(unittest.TestCase):
                          "channel_notifications"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+            membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
         self.assertIn("attachment_id", message_columns)
+        self.assertIn("role", membership_columns)
+
+    def test_existing_memberships_are_migrated_to_member_role(self):
+        original_path = database.DB_PATH
+        with tempfile.TemporaryDirectory() as folder:
+            legacy_path = Path(folder) / "legacy.db"
+            legacy = sqlite3.connect(legacy_path)
+            legacy.executescript("""
+              CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                password_hash TEXT NOT NULL, created_at TEXT NOT NULL);
+              CREATE TABLE communities (id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                owner_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
+              CREATE TABLE memberships (community_id INTEGER NOT NULL REFERENCES communities(id),
+                user_id INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY (community_id,user_id));
+              INSERT INTO users VALUES(1,'legacy_owner','unused','2026-01-01T00:00:00Z');
+              INSERT INTO communities VALUES(1,'Legacy',1,'2026-01-01T00:00:00Z');
+              INSERT INTO memberships VALUES(1,1);
+            """)
+            legacy.commit()
+            legacy.close()
+            try:
+                database.DB_PATH = legacy_path
+                database.initialize_database()
+                with database.connect() as migrated:
+                    role = migrated.execute("SELECT role FROM memberships WHERE user_id=1").fetchone()[0]
+            finally:
+                database.DB_PATH = original_path
+        self.assertEqual(role, "member")
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")
@@ -207,8 +237,8 @@ class CampfireTests(unittest.TestCase):
                                    ("invite_member", "unused", database.utc_now())).lastrowid
             community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                       ("Invite Management", owner_id, database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, member_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, member_id))
             active_id = db.execute("""INSERT INTO invitations
               (community_id,created_by,token_hash,expires_at,max_uses,uses,created_at)
               VALUES(?,?,?,?,?,?,?)""",
@@ -224,11 +254,22 @@ class CampfireTests(unittest.TestCase):
             visible = list_active_invites(db, community_id, owner_id, timestamp=1000)
             forbidden = list_active_invites(db, community_id, member_id, timestamp=1000)
             member_revoked = revoke_invite(db, active_id, member_id)
+            admin_invite_id = db.execute("""INSERT INTO invitations
+              (community_id,created_by,token_hash,expires_at,max_uses,uses,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (community_id, owner_id, security.invite_hash("admin-active"), 2000, 3, 0,
+               database.utc_now())).lastrowid
+            db.execute("UPDATE memberships SET role='administrator' WHERE community_id=? AND user_id=?",
+                       (community_id, member_id))
+            admin_visible = list_active_invites(db, community_id, member_id, timestamp=1000)
+            admin_revoked = revoke_invite(db, admin_invite_id, member_id)
             owner_revoked = revoke_invite(db, active_id, owner_id)
             remaining = db.execute("SELECT 1 FROM invitations WHERE id=?", (active_id,)).fetchone()
         self.assertEqual([invite["id"] for invite in visible], [active_id])
         self.assertIsNone(forbidden)
         self.assertFalse(member_revoked)
+        self.assertEqual([invite["id"] for invite in admin_visible], [admin_invite_id, active_id])
+        self.assertTrue(admin_revoked)
         self.assertTrue(owner_revoked)
         self.assertIsNone(remaining)
 
@@ -242,13 +283,36 @@ class CampfireTests(unittest.TestCase):
                                      ("member_outsider", "unused", database.utc_now())).lastrowid
             community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                       ("Member Test", owner_id, database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, member_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, member_id))
             visible = list_community_members(db, community_id, member_id)
             hidden = list_community_members(db, community_id, outsider_id)
         self.assertEqual([member["role"] for member in visible], ["owner", "member"])
         self.assertEqual(visible[0]["id"], owner_id)
         self.assertIsNone(hidden)
+
+    def test_owner_assigns_roles_and_ownership_cannot_be_reassigned(self):
+        with database.connect() as db:
+            owner_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("role_owner", "unused", database.utc_now())).lastrowid
+            member_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                   ("role_member", "unused", database.utc_now())).lastrowid
+            community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                      ("Role Test", owner_id, database.utc_now())).lastrowid
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, member_id))
+
+            promoted = set_member_role(db, community_id, member_id, owner_id, "administrator")
+            self.assertEqual(promoted["role"], "administrator")
+            self.assertEqual(community_role(db, community_id, member_id), "administrator")
+            self.assertTrue(has_role(db, community_id, member_id, "moderator"))
+            self.assertEqual([entry["role"] for entry in
+                              list_community_members(db, community_id, owner_id)],
+                             ["owner", "administrator"])
+            self.assertFalse(set_member_role(db, community_id, member_id, owner_id, "owner"))
+            self.assertFalse(set_member_role(db, community_id, owner_id, owner_id, "member"))
+            self.assertIsNone(set_member_role(db, community_id, owner_id, member_id, "member"))
+            self.assertEqual(community_role(db, community_id, owner_id), "owner")
 
     def message_fixture(self, db, label, attachment=False):
         """Build an owner, an author, a bystander, an outsider, and one message."""
@@ -259,7 +323,7 @@ class CampfireTests(unittest.TestCase):
         community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                   (label, actors["owner"], database.utc_now())).lastrowid
         for role in ("owner", "author", "bystander"):
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, actors[role]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, actors[role]))
         channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                 (community_id, "general", database.utc_now())).lastrowid
         attachment_id = None
@@ -291,6 +355,17 @@ class CampfireTests(unittest.TestCase):
             self.assertTrue(may_delete(visible_message(db, message_id, actors["author"])))
             self.assertTrue(may_delete(visible_message(db, message_id, actors["owner"])))
             self.assertFalse(may_delete(visible_message(db, message_id, actors["bystander"])))
+
+    def test_moderators_and_administrators_may_delete_but_members_may_not(self):
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "role_delete_rules")
+            community_id = db.execute("""SELECT ch.community_id FROM messages m
+                                          JOIN channels ch ON ch.id=m.channel_id WHERE m.id=?""",
+                                      (message_id,)).fetchone()[0]
+            for role, expected in (("moderator", True), ("administrator", True), ("member", False)):
+                db.execute("UPDATE memberships SET role=? WHERE community_id=? AND user_id=?",
+                           (role, community_id, actors["bystander"]))
+                self.assertEqual(may_delete(visible_message(db, message_id, actors["bystander"])), expected)
 
     def test_messages_are_invisible_outside_their_community(self):
         with database.connect() as db:
@@ -377,9 +452,9 @@ class CampfireTests(unittest.TestCase):
                                 ("Shared", actors["resident"], database.utc_now())).lastrowid
             elsewhere = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                    ("Elsewhere", actors["stranger"], database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (shared, actors["resident"]))
-            db.execute("INSERT INTO memberships VALUES(?,?)", (shared, actors["neighbour"]))
-            db.execute("INSERT INTO memberships VALUES(?,?)", (elsewhere, actors["stranger"]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (shared, actors["resident"]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (shared, actors["neighbour"]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (elsewhere, actors["stranger"]))
 
             self.assertTrue(shares_community(db, actors["resident"], actors["neighbour"]))
             self.assertTrue(shares_community(db, actors["resident"], actors["resident"]))
@@ -393,8 +468,8 @@ class CampfireTests(unittest.TestCase):
                                    ("presence_absent", "unused", database.utc_now())).lastrowid
             community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                       ("Presence", owner_id, database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, owner_id))
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, absent_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, owner_id))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, absent_id))
             members = list_community_members(db, community_id, owner_id, frozenset({owner_id}))
             without_presence = list_community_members(db, community_id, owner_id)
         self.assertEqual({member["username"]: member["online"] for member in members},
@@ -467,7 +542,7 @@ class CampfireTests(unittest.TestCase):
         community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
                                   (label, actors["owner"], database.utc_now())).lastrowid
         for role in ("owner", "member"):
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, actors[role]))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, actors[role]))
         channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                 (community_id, "general", database.utc_now())).lastrowid
         message_ids = [
@@ -512,7 +587,7 @@ class CampfireTests(unittest.TestCase):
             actors, community_id, channel_id, message_ids = self.unread_fixture(db, "unread_arrival")
             arrival = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
                                  ("unread_arrival_joiner", "unused", database.utc_now())).lastrowid
-            db.execute("INSERT INTO memberships VALUES(?,?)", (community_id, arrival))
+            db.execute("INSERT INTO memberships(community_id,user_id) VALUES(?,?)", (community_id, arrival))
             mark_community_read(db, community_id, arrival)
             settled = channel_states(db, arrival)[channel_id]
             self.assertEqual(settled["unread"], 0)

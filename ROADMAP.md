@@ -35,16 +35,16 @@ does not lose data; all persistent data is documented.
 
 ## Milestone 2 — Community control and data lifecycle
 
-Status: next
+Status: in progress
 
-- Roles: owner, administrator, moderator, member
-- Kick/ban, channel permissions, slow mode, and upload controls
-- Account password change, active-session list, and remote session revocation
-- Per-community message and attachment retention settings
-- User account deletion and operator-assisted data export
-- Attachment deletion when its message is removed *(delivered with message
+- [x] Roles: owner, administrator, moderator, member
+- [ ] Kick/ban, channel permissions, slow mode, and upload controls
+- [ ] Account password change, active-session list, and remote session revocation
+- [ ] Per-community message and attachment retention settings
+- [ ] User account deletion and operator-assisted data export
+- [x] Attachment deletion when its message is removed *(delivered with message
   deletion in Milestone 1)*
-- Storage quota and visible disk-usage reporting
+- [ ] Storage quota and visible disk-usage reporting
 
 Exit criteria: a community owner can manage abuse and retention without editing
 SQLite manually, and deletion behavior is covered by integration tests.
