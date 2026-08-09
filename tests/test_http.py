@@ -100,6 +100,23 @@ class HTTPTests(unittest.TestCase):
                         database.utc_now()))
         return token
 
+    def signed_in_with_password(self, username, password=PASSWORD):
+        """A signed-in account whose real password is known.
+
+        Registration is rate-limited on one bucket per client address, so tests
+        that only need an account — rather than to exercise registering — build
+        it directly instead of spending that shared allowance.
+        """
+        token = secrets.token_urlsafe(32)
+        with database.connect() as db:
+            user_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                 (username, security.password_hash(password),
+                                  database.utc_now())).lastrowid
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (security.session_hash(token), user_id, int(time.time()) + 600,
+                        database.utc_now()))
+        return token
+
     def user_id_for(self, username):
         with database.connect() as db:
             return db.execute("SELECT id FROM users WHERE username=?", (username,)).fetchone()[0]
@@ -631,13 +648,18 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertIn("incorrect", payload["error"].lower())
 
-        status, payload, _ = self.request("PATCH", "/api/account/password", {
+        status, payload, rotated = self.request("PATCH", "/api/account/password", {
             "current_password": PASSWORD, "new_password": replacement}, cookie=current)
         self.assertEqual(status, 200)
         self.assertEqual(payload["revoked_sessions"], 1)
+        self.assertTrue(rotated and rotated != current,
+                        "a password change must reissue the session that confirmed it")
 
-        _, payload, _ = self.request("GET", "/api/me", cookie=current)
+        _, payload, _ = self.request("GET", "/api/me", cookie=rotated)
         self.assertEqual(payload["user"]["username"], "password_changer")
+        _, payload, _ = self.request("GET", "/api/me", cookie=current)
+        self.assertIsNone(payload["user"],
+                          "the cookie in play before the change must stop working too")
         _, payload, _ = self.request("GET", "/api/me", cookie=remote)
         self.assertIsNone(payload["user"])
         status, _, _ = self.request("POST", "/api/login", {
@@ -647,6 +669,32 @@ class HTTPTests(unittest.TestCase):
             "username": "password_changer", "password": replacement})
         self.assertEqual(status, 200)
         self.assertTrue(replacement_session)
+
+    def test_a_rejected_new_password_does_not_spend_the_rate_limit(self):
+        """Fumbling the form is the client's own mistake, not an attempt to guess."""
+        cookie = self.signed_in_with_password("limit_spender")
+        # Comfortably past the eight attempts a five-minute window allows.
+        for _ in range(12):
+            status, _, _ = self.request("PATCH", "/api/account/password", {
+                "current_password": PASSWORD, "new_password": "short"}, cookie=cookie)
+            self.assertEqual(status, 400)
+
+        replacement = "a different sufficiently long password"
+        status, _, rotated = self.request("PATCH", "/api/account/password", {
+            "current_password": PASSWORD, "new_password": replacement}, cookie=cookie)
+        self.assertEqual(status, 200, "validation failures must not lock the account out")
+        self.assertTrue(rotated)
+
+    def test_a_wrong_current_password_still_spends_the_rate_limit(self):
+        cookie = self.signed_in_with_password("limit_guesser")
+        replacement = "a different sufficiently long password"
+        seen = set()
+        for _ in range(12):
+            status, _, _ = self.request("PATCH", "/api/account/password", {
+                "current_password": "not the current password",
+                "new_password": replacement}, cookie=cookie)
+            seen.add(status)
+        self.assertEqual(seen, {403, 429}, "guessing the current password must still be limited")
 
     def test_the_current_session_can_sign_itself_out(self):
         current = self.signed_in_user("self_revoker")

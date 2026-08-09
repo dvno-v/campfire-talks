@@ -36,11 +36,19 @@ encrypted. A compromised host, browser, or administrator can read them.
   Only a SHA-256 digest of each token is stored, and only the original token is
   accepted, so a stolen database or backup yields no usable session. Accounts
   can list their own active sessions and revoke any one without learning its
-  token; another account receives the same `404` as a missing session.
+  token; another account receives the same `404` as a missing session. Session
+  identifiers are allocated by AUTOINCREMENT and never reissued, so a listing
+  held open while sessions come and go cannot revoke one it never showed.
 - Password changes require the existing password, use a separate rate-limit
-  scope, replace the stored hash, and revoke every session except the caller's.
-  Live streams re-check their opening session every two seconds, so remote
-  revocation also terminates an already connected browser.
+  scope, replace the stored hash, revoke every other session, and reissue the
+  surviving one with a fresh token. A password change is where someone acts on
+  the suspicion that a credential leaked, and the cookie alongside it is part
+  of what may have leaked. The rate limit is charged only once the submitted
+  password is about to be checked, so failing the length or repetition rules
+  cannot lock an account out without a single guess being made.
+- Live streams re-check their session every two seconds against its token
+  digest, so remote revocation terminates an already connected browser. The
+  digest is used rather than a row identifier because it is never reissued.
 - Account deletion requires the current password, uses its own rate-limit
   scope, and is authorized only for the caller's own account: there is no
   endpoint by which one account can delete another. Ownership of a community is

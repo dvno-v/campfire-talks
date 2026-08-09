@@ -80,6 +80,7 @@ class CampfireTests(unittest.TestCase):
         self.assertIn("attachment_id", message_columns)
         self.assertIn("role", membership_columns)
         self.assertIn("created_at", session_columns)
+        self.assertIn("id", session_columns)
 
     def test_existing_memberships_are_migrated_to_member_role(self):
         original_path = database.DB_PATH
@@ -107,12 +108,17 @@ class CampfireTests(unittest.TestCase):
                 database.initialize_database()
                 with database.connect() as migrated:
                     role = migrated.execute("SELECT role FROM memberships WHERE user_id=1").fetchone()[0]
-                    session_created = migrated.execute(
-                        "SELECT created_at FROM sessions WHERE user_id=1").fetchone()[0]
+                    session = migrated.execute(
+                        "SELECT id,token,created_at FROM sessions WHERE user_id=1").fetchone()
+                    session_columns = {row[1] for row in
+                                       migrated.execute("PRAGMA table_info(sessions)")}
             finally:
                 database.DB_PATH = original_path
         self.assertEqual(role, "member")
-        self.assertIsNotNone(session_created)
+        self.assertIsNotNone(session["created_at"])
+        self.assertIn("id", session_columns, "an older sessions table gains a stable id")
+        self.assertEqual(session["token"], "legacy-token",
+                         "rebuilding the table must not sign everyone out")
 
     def test_password_change_and_session_revocation_keep_only_the_current_session(self):
         with database.connect() as db:
@@ -136,17 +142,21 @@ class CampfireTests(unittest.TestCase):
             self.assertEqual(len(sessions), 2)
             self.assertTrue(sessions[0]["current"])
             self.assertIsNone(revoke_session(db, user_id, other_id, current, timestamp=1000))
+            rotated = security.session_hash("rotated-session")
             self.assertIsNone(change_password(db, user_id, "wrong password",
-                                               "new password long enough", current))
+                                              "new password long enough", current, rotated))
             revoked = change_password(db, user_id, "old password long enough",
-                                      "new password long enough", current)
+                                      "new password long enough", current, rotated)
             self.assertEqual(revoked, 1)
             self.assertTrue(security.password_matches(
                 "new password long enough",
                 db.execute("SELECT password_hash FROM users WHERE id=?", (user_id,)).fetchone()[0]))
             self.assertEqual([entry["id"] for entry in
-                              list_sessions(db, user_id, current, timestamp=1000)],
-                             [sessions[0]["id"]])
+                              list_sessions(db, user_id, rotated, timestamp=1000)],
+                             [sessions[0]["id"]],
+                             "the surviving session keeps its identity, not its token")
+            self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE token=?", (current,)).fetchone(),
+                              "the token that confirmed the change must not survive it")
 
     def account_fixture(self, db, label, password="a sufficiently long password"):
         """Build an account that owns one community and has written in another."""
@@ -280,6 +290,24 @@ class CampfireTests(unittest.TestCase):
                              (actors["owned"],)).fetchone()
         self.assertEqual(ban["user_id"], actors["member"], "the ban must outlive the moderator's account")
         self.assertIsNone(ban["banned_by"])
+
+    def test_a_revoked_session_id_is_never_given_to_a_later_session(self):
+        """A stale list must not be able to revoke a session it never showed."""
+        with database.connect() as db:
+            user_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                 ("recycled_ids", "unused", database.utc_now())).lastrowid
+            first = security.session_hash("first-session")
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (first, user_id, 2000, "2026-01-01T00:00:00Z"))
+            highest = list_sessions(db, user_id, first, timestamp=1000)[0]["id"]
+            self.assertIs(revoke_session(db, user_id, highest, first, timestamp=1000), True)
+
+            db.execute("INSERT INTO sessions(token,user_id,expires_at,created_at) VALUES(?,?,?,?)",
+                       (security.session_hash("later-session"), user_id, 2000,
+                        "2026-01-02T00:00:00Z"))
+            replacement = list_sessions(db, user_id, "none", timestamp=1000)[0]
+        self.assertNotEqual(replacement["id"], highest,
+                            "reusing the id would point a stale Sign out at the wrong session")
 
     def test_removing_a_member_revokes_the_invites_they_created(self):
         """A ban that leaves working invite codes behind has not closed the door."""

@@ -45,8 +45,13 @@ def initialize_database():
           id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
           password_hash TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        -- AUTOINCREMENT, so a revoked session's id is never handed to a later
+        -- one. A plain rowid is reused as soon as the highest row is deleted,
+        -- which would let a stale session list revoke the wrong session.
         CREATE TABLE IF NOT EXISTS sessions (
-          token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          token TEXT NOT NULL UNIQUE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS communities (
@@ -129,11 +134,34 @@ def initialize_database():
         if "created_at" not in session_columns:
             database.execute("ALTER TABLE sessions ADD COLUMN created_at TEXT")
             database.execute("UPDATE sessions SET created_at=? WHERE created_at IS NULL", (utc_now(),))
+        if "id" not in session_columns:
+            rebuild_sessions_with_stable_ids(database)
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
     # WAL's side files appear only once something has been written.
     restrict_permissions()
+
+
+def rebuild_sessions_with_stable_ids(database):
+    """Give an older `sessions` table a surrogate key that is never reused.
+
+    A column cannot be promoted to AUTOINCREMENT in place, so the table is
+    rebuilt and its rows copied across. Everyone stays signed in: the tokens
+    are what authenticate, and they are carried over untouched.
+    """
+    database.executescript("""
+      CREATE TABLE sessions_rebuilt (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token TEXT NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
+      );
+      INSERT INTO sessions_rebuilt(token,user_id,expires_at,created_at)
+        SELECT token,user_id,expires_at,created_at FROM sessions ORDER BY rowid;
+      DROP TABLE sessions;
+      ALTER TABLE sessions_rebuilt RENAME TO sessions;
+    """)
 
 
 def enforce_username_case_uniqueness(database):

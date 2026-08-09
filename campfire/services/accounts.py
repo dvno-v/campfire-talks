@@ -17,9 +17,9 @@ def list_sessions(database, actor_id, current_token, timestamp=None):
     """Return the actor's active sessions without collecting device metadata."""
     timestamp = int(time.time() if timestamp is None else timestamp)
     rows = database.execute("""
-      SELECT rowid id,created_at,expires_at,token=? is_current
+      SELECT id,created_at,expires_at,token=? is_current
       FROM sessions WHERE user_id=? AND expires_at>?
-      ORDER BY is_current DESC,created_at DESC,rowid DESC
+      ORDER BY is_current DESC,created_at DESC,id DESC
     """, (current_token, actor_id, timestamp)).fetchall()
     return [{"id": row["id"], "created_at": row["created_at"],
              "expires_at": row["expires_at"], "current": bool(row["is_current"])}
@@ -34,17 +34,25 @@ def revoke_session(database, actor_id, session_id, current_token, timestamp=None
     """
     timestamp = int(time.time() if timestamp is None else timestamp)
     row = database.execute(
-        "SELECT token FROM sessions WHERE rowid=? AND user_id=? AND expires_at>?",
+        "SELECT token FROM sessions WHERE id=? AND user_id=? AND expires_at>?",
         (session_id, actor_id, timestamp),
     ).fetchone()
     if not row:
         return None
-    database.execute("DELETE FROM sessions WHERE rowid=? AND user_id=?", (session_id, actor_id))
+    database.execute("DELETE FROM sessions WHERE id=? AND user_id=?", (session_id, actor_id))
     return row["token"] == current_token
 
 
-def change_password(database, actor_id, current_password, new_password, current_token):
-    """Change the password and revoke every session except the caller's."""
+def change_password(database, actor_id, current_password, new_password, current_token,
+                    replacement_token):
+    """Change the password, revoke every other session, and reissue the caller's.
+
+    The surviving session is given a new token rather than kept as it was. A
+    password change is where someone acts on the suspicion that a credential
+    leaked, and the cookie riding along with the old one is part of what may
+    have leaked. The caller supplies the replacement because tokens belong to
+    the layer that sets cookies.
+    """
     user = database.execute("SELECT password_hash FROM users WHERE id=?", (actor_id,)).fetchone()
     if not user or not password_matches(current_password, user["password_hash"]):
         return None
@@ -52,6 +60,8 @@ def change_password(database, actor_id, current_password, new_password, current_
                      (password_hash(new_password), actor_id))
     revoked = database.execute("DELETE FROM sessions WHERE user_id=? AND token<>?",
                                (actor_id, current_token)).rowcount
+    database.execute("UPDATE sessions SET token=? WHERE user_id=? AND token=?",
+                     (replacement_token, actor_id, current_token))
     return revoked
 
 

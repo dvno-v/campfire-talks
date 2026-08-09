@@ -25,11 +25,15 @@ five minutes.
 The account-security screen lists only active sessions and shows their creation
 and expiry times. Revoking one deletes its row immediately and closes any live
 event stream using it within about two seconds. A password change overwrites
-the prior password hash and deletes every session except the one confirming the
-change. Neither revoked-session history nor prior password hashes are retained;
-older backups can contain the replaced rows until those backups are rotated.
-For sessions created before this field existed, the first upgraded release uses
-its startup time as the creation time because no earlier timestamp was stored.
+the prior password hash, deletes every session except the one confirming the
+change, and issues that surviving session a new token, so the cookie in play
+beforehand stops working too. Neither revoked-session history nor prior
+password hashes are retained; older backups can contain the replaced rows until
+those backups are rotated. For sessions created before that field existed, the
+first upgraded release uses its startup time as the creation time because no
+earlier timestamp was stored. The release that gave sessions a stable
+identifier rebuilds the table in place and carries the tokens across, so
+upgrading does not sign anyone out.
 
 An account can download everything Campfire stores about it as a single JSON
 file: the account row without its password hash, when each session began and

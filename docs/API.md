@@ -47,9 +47,13 @@ Deletes the current server-side session and expires the browser cookie.
 ```
 
 Requires the current password, accepts a 12–1024 character replacement, and
-is rate-limited independently from sign-in. A successful change keeps the
-session making the request and immediately revokes every other session for the
-account. The response reports that count as `revoked_sessions`.
+is rate-limited independently from sign-in. The limit is spent only when the
+submitted password is actually checked, so a rejected replacement — too short,
+or the same as the current one — costs nothing. A successful change immediately
+revokes every other session for the account and reports that count as
+`revoked_sessions`. The session making the request survives but is reissued: the
+response carries a new `Set-Cookie`, and the token that authorized the change
+stops working.
 
 ### `GET /api/sessions`
 
