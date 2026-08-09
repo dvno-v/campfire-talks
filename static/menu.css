@@ -1,0 +1,115 @@
+/* The per-row actions menu.
+   Messages and members both carry actions that only some people may take and
+   nobody needs on screen at all times. A single trigger opens them on demand
+   instead of parking two labelled buttons on every row. */
+
+.row-menu-trigger {
+  align-items: center;
+  background: none;
+  border-radius: 7px;
+  color: var(--muted);
+  display: inline-flex;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
+  width: 28px;
+}
+
+.row-menu-trigger svg {
+  fill: currentcolor;
+}
+
+/* With a mouse the trigger stays out of the way until the row is under the
+   pointer. `:focus-within` keeps it reachable by keyboard, and an open menu
+   keeps its own trigger showing. */
+.message-row .row-menu-trigger,
+.member-row .row-menu-trigger {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .12s ease;
+}
+
+.message-row:hover .row-menu-trigger,
+.message-row:focus-within .row-menu-trigger,
+.member-row:hover .row-menu-trigger,
+.member-row:focus-within .row-menu-trigger,
+.row-menu-trigger[aria-expanded='true'] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.row-menu-trigger:hover,
+.row-menu-trigger[aria-expanded='true'] {
+  background: #ffffff12;
+  color: var(--ink);
+}
+
+/* Touch has no hover to reveal anything with, so one small trigger per row
+   stays put. That is still far less than the two labelled buttons it replaced. */
+@media (hover: none) {
+  .message-row .row-menu-trigger,
+  .member-row .row-menu-trigger {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.message-row .row-menu {
+  position: absolute;
+  right: 0;
+  top: 1px;
+}
+
+/* Reserved so a long author-and-timestamp line cannot run under the trigger. */
+.message-row.has-actions {
+  padding-right: 34px;
+}
+
+.member-row .row-menu {
+  align-self: center;
+}
+
+/* ---------- The popup ---------------------------------------------------- */
+
+/* Positioned against the viewport rather than the row: both lists scroll, and
+   a menu on the last row would otherwise be clipped by its own container. */
+.row-menu-popup {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 18px 44px #0009;
+  display: none;
+  min-width: 148px;
+  padding: 5px;
+  position: fixed;
+  z-index: 40;
+}
+
+.row-menu-popup.open {
+  display: grid;
+  gap: 1px;
+}
+
+.row-menu-popup button {
+  background: none;
+  border-radius: 7px;
+  color: var(--ink);
+  font-size: 14px;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.row-menu-popup button:hover,
+.row-menu-popup button:focus-visible {
+  background: #ffffff10;
+}
+
+.row-menu-popup button.danger-item {
+  color: var(--danger);
+}
+
+.row-menu-popup button.danger-item:hover,
+.row-menu-popup button.danger-item:focus-visible {
+  background: #ff7b7218;
+}

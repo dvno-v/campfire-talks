@@ -35,6 +35,11 @@ docs/                     security, privacy, API, operations, and roadmap
 - Each stylesheet in `static/` owns one panel; `shell.css` owns the responsive
   shell and is linked last, so it is the only file permitted to override the
   others' layout. Panel stylesheets do not carry their own breakpoints.
+- `menu.css` is the exception to one-panel ownership: the row actions menu is
+  shared by messages and members. Both render one trigger per row and fill a
+  single popup element as it opens, rather than each keeping its own hidden
+  menu in the DOM. Row actions stay out of sight until a row is hovered, and
+  are always present on touch, where there is no hover to reveal them with.
 
 ## Responsive shell
 

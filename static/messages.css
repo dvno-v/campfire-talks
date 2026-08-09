@@ -2,59 +2,7 @@
   position: relative;
 }
 
-.message-actions {
-  background: var(--panel2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  display: flex;
-  gap: 2px;
-  opacity: 0;
-  padding: 2px;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
-  top: -12px;
-}
-
-.message-row:hover .message-actions,
-.message-row:focus-within .message-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-/* Without hover there is no other way to reach these controls, so they stay
-   visible. Floating them over the row would then permanently cover the author
-   and timestamp they sit on, so on touch they drop into the flow beneath the
-   message instead. */
-@media (hover: none) {
-  .message-actions {
-    grid-column: 2;
-    justify-self: start;
-    margin-top: 7px;
-    opacity: 1;
-    pointer-events: auto;
-    position: static;
-  }
-}
-
-.message-actions button {
-  background: none;
-  border: 0;
-  border-radius: 6px;
-  color: var(--muted);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 4px 8px;
-}
-
-.message-actions button:hover {
-  background: #1118;
-  color: var(--ink);
-}
-
-.message-actions button[data-delete-message]:hover {
-  color: var(--danger);
-}
+/* Edit and delete live in the shared row menu; see menu.css. */
 
 .message-edited {
   color: #8f9099;

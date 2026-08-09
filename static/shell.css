@@ -120,11 +120,6 @@
     padding: 12px 10px 12px 16px;
   }
 
-  .member-actions button {
-    font-size: 12px;
-    padding: 8px 12px;
-  }
-
   .member-role-select {
     font-size: 12px;
     padding: 6px 8px;
@@ -134,9 +129,11 @@
     padding: 11px 14px;
   }
 
-  .message-actions button {
-    font-size: 13px;
-    padding: 8px 12px;
+  /* The trigger is a single icon, so it takes the full target rather than the
+     narrower allowance the sidebar header's four controls share. */
+  .row-menu-trigger {
+    height: 38px;
+    width: 38px;
   }
 }
 

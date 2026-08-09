@@ -201,6 +201,78 @@ async function loadMembers(communityId) {
   catch(error) { if(state.community?.id===communityId) $('#member-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; }
 }
 
+// ---------- Per-row actions menu ----------
+// Messages and members both carry actions only some people may take. One
+// trigger per row opens them on demand; a hidden menu per row would be a lot
+// of DOM for something only ever open in one place at a time, so the popup is
+// a single shared element that is filled in as it opens.
+const MENU_ICON = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="8" cy="3" r="1.6"/><circle cx="8" cy="8" r="1.6"/><circle cx="8" cy="13" r="1.6"/></svg>';
+let openMenuTrigger = null;
+
+function rowMenuTrigger(attribute, label) {
+  return `<div class="row-menu"><button class="row-menu-trigger" type="button" ${attribute} aria-haspopup="true" aria-expanded="false" aria-label="${escapeHTML(label)}">${MENU_ICON}</button></div>`;
+}
+
+function closeRowMenu({ refocus = false } = {}) {
+  const menu = $('#row-menu');
+  menu.classList.remove('open');
+  menu.innerHTML = '';
+  if (openMenuTrigger) {
+    openMenuTrigger.setAttribute('aria-expanded', 'false');
+    if (refocus && openMenuTrigger.isConnected) openMenuTrigger.focus();
+  }
+  openMenuTrigger = null;
+}
+
+function openRowMenu(trigger, items) {
+  const reopening = openMenuTrigger === trigger;
+  closeRowMenu();
+  if (reopening) return;  // a second press on the same row closes it again
+  const menu = $('#row-menu');
+  menu.innerHTML = items.map((item, index) =>
+    `<button type="button" role="menuitem" data-index="${index}"${item.danger ? ' class="danger-item"' : ''}>${escapeHTML(item.label)}</button>`).join('');
+  menu.querySelectorAll('button').forEach(button => button.onclick = () => {
+    const { action } = items[Number(button.dataset.index)];
+    closeRowMenu();
+    action();
+  });
+  menu.classList.add('open');
+  openMenuTrigger = trigger;
+  trigger.setAttribute('aria-expanded', 'true');
+  placeRowMenu(trigger, menu);
+  // `preventScroll`: the popup is already placed against the viewport, and
+  // letting focus scroll an ancestor to reveal it would fire the scroll
+  // handler below and close what was just opened.
+  menu.querySelector('button')?.focus({ preventScroll: true });
+}
+
+function placeRowMenu(trigger, menu) {
+  const anchor = trigger.getBoundingClientRect(), size = menu.getBoundingClientRect(), margin = 8;
+  // Below and right-aligned to the trigger by preference, flipped above when
+  // that would run off the bottom, and never past either side edge.
+  const left = Math.min(Math.max(margin, anchor.right - size.width), window.innerWidth - size.width - margin);
+  const below = anchor.bottom + 6;
+  const fits = below + size.height + margin <= window.innerHeight;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(fits ? below : Math.max(margin, anchor.top - size.height - 6))}px`;
+}
+
+// A re-render replaces the row the open menu belongs to, which takes its
+// trigger — and the thing the menu was about — out of the document.
+function dropDetachedRowMenu() { if (openMenuTrigger && !openMenuTrigger.isConnected) closeRowMenu(); }
+
+document.addEventListener('pointerdown', event => {
+  if (!openMenuTrigger || $('#row-menu').contains(event.target) || openMenuTrigger.contains(event.target)) return;
+  closeRowMenu();
+});
+// The popup is placed against the viewport, so anything that moves the row
+// beneath it invalidates that placement. Scrolling takes the row away, so the
+// menu goes with it; a resize only changes where it belongs — and on a phone
+// every hide of the address bar is a resize, so closing on that would snatch
+// the menu away mid-reach.
+window.addEventListener('scroll', () => closeRowMenu(), true);
+window.addEventListener('resize', () => { if (openMenuTrigger) placeRowMenu(openMenuTrigger, $('#row-menu')); });
+
 function memberRoleControl(member) {
   if (member.role === 'owner') return '<span class="member-role">OWNER</span>';
   if (currentCommunityRole() !== 'owner') return member.role === 'member' ? '' : `<span class="member-role">${escapeHTML(member.role.toUpperCase())}</span>`;
@@ -208,8 +280,9 @@ function memberRoleControl(member) {
 }
 
 function memberRow(member) {
-  const actions = canModerateMember(member) ? `<div class="member-actions"><button type="button" data-kick-member="${Number(member.id)}">Kick</button><button type="button" data-ban-member="${Number(member.id)}">Ban</button></div>` : '';
-  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${memberRoleControl(member)}${actions}</div></article>`;
+  const actions = canModerateMember(member)
+    ? rowMenuTrigger(`data-member-menu="${Number(member.id)}"`, `Actions for ${member.username}`) : '';
+  return `<article class="member-row ${state.online.has(member.id) ? 'online' : 'offline'}"><div class="member-avatar">${escapeHTML(initials(member.username))}<span class="presence-dot" title="${state.online.has(member.id) ? 'Online' : 'Offline'}"></span></div><div class="member-identity"><strong>${escapeHTML(member.username)}</strong>${memberRoleControl(member)}</div>${actions}</article>`;
 }
 
 function renderMembers() {
@@ -227,14 +300,14 @@ function renderMembers() {
     select.value = member.role;
     select.onchange = () => { select.disabled = true; updateMemberRole(member, select.value); };
   });
-  document.querySelectorAll('[data-kick-member]').forEach(button => {
-    const member = state.members.find(entry => entry.id === Number(button.dataset.kickMember));
-    button.onclick = () => moderateMember(member, false);
+  document.querySelectorAll('[data-member-menu]').forEach(button => {
+    const member = state.members.find(entry => entry.id === Number(button.dataset.memberMenu));
+    button.onclick = () => openRowMenu(button, [
+      { label: 'Kick', action: () => moderateMember(member, false) },
+      { label: 'Ban', danger: true, action: () => moderateMember(member, true) },
+    ]);
   });
-  document.querySelectorAll('[data-ban-member]').forEach(button => {
-    const member = state.members.find(entry => entry.id === Number(button.dataset.banMember));
-    button.onclick = () => moderateMember(member, true);
-  });
+  dropDetachedRowMenu();
 }
 
 function applyPresence(event) {
@@ -317,7 +390,7 @@ function canModerateMember(member) { return member.id !== state.user?.id && canM
 function mayModerate() { return ['owner', 'administrator', 'moderator'].includes(currentCommunityRole()); }
 function roleBadge(userId) { const role=state.members.find(member=>member.id===Number(userId))?.role; return role && role!=='member' ? `<span class="owner-indicator">${escapeHTML(role.toUpperCase())}</span>` : ''; }
 // Author role badges depend on the member list, which arrives after the first messages.
-function refreshMessages() { document.querySelectorAll('.message-row').forEach(row => { const message=state.messages.get(Number(row.dataset.messageId)); if(message) renderInto(row, message); }); }
+function refreshMessages() { document.querySelectorAll('.message-row').forEach(row => { const message=state.messages.get(Number(row.dataset.messageId)); if(message) renderInto(row, message); }); dropDetachedRowMenu(); }
 
 async function selectChannel(channel) {
   state.channel = channel; state.unreadBoundary = false;
@@ -345,11 +418,20 @@ async function selectChannel(channel) {
   scrollMessages(); readActiveChannel();
 }
 
-function messageActions(message) {
+// Editing is the author's alone; deleting is the author's or a moderator's.
+function messageMenuItems(message) {
   const authored = message.author_id === state.user?.id;
-  if (!authored && !mayModerate()) return '';
-  const edit = authored && !message.attachment ? `<button type="button" data-edit-message title="Edit message">Edit</button>` : '';
-  return `<div class="message-actions">${edit}<button type="button" data-delete-message title="Delete message">Delete</button></div>`;
+  if (!authored && !mayModerate()) return [];
+  const items = [];
+  // A shared image is replaced by deleting it, never rewritten in place.
+  if (authored && !message.attachment) items.push({ label: 'Edit', action: () => startEdit(message) });
+  items.push({ label: 'Delete', danger: true, action: () => deleteMessage(message) });
+  return items;
+}
+
+function messageActions(message) {
+  return messageMenuItems(message).length
+    ? rowMenuTrigger('data-message-menu', 'Message actions') : '';
 }
 
 function messageMarkup(message) {
@@ -362,8 +444,10 @@ function messageMarkup(message) {
 function renderInto(row, message) {
   state.messages.set(Number(message.id), message);
   row.innerHTML = messageMarkup(message);
-  row.querySelector('[data-edit-message]')?.addEventListener('click', () => startEdit(message));
-  row.querySelector('[data-delete-message]')?.addEventListener('click', () => deleteMessage(message));
+  const trigger = row.querySelector('[data-message-menu]');
+  // Only a row with something to offer reserves the gutter the trigger sits in.
+  row.classList.toggle('has-actions', Boolean(trigger));
+  trigger?.addEventListener('click', () => openRowMenu(trigger, messageMenuItems(message)));
 }
 
 function appendMessage(message) {
@@ -423,7 +507,19 @@ function setNavOpen(open) {
 function closeNavOnDrawer() { if (navIsDrawer()) setNavOpen(false); }
 $('#toggle-nav').onclick = () => { $('#members-panel').classList.remove('open'); setNavOpen(!$('#app').classList.contains('nav-open')); };
 $('#nav-scrim').onclick = () => setNavOpen(false);
-document.addEventListener('keydown', event => { if (event.key === 'Escape') { setNavOpen(false); $('#members-panel').classList.remove('open'); } });
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    // Innermost first: a menu opened over the drawer closes the menu, not the drawer.
+    if (openMenuTrigger) return closeRowMenu({ refocus: true });
+    setNavOpen(false); $('#members-panel').classList.remove('open');
+    return;
+  }
+  if (!openMenuTrigger || (event.key !== 'ArrowDown' && event.key !== 'ArrowUp')) return;
+  event.preventDefault();
+  const items = [...$('#row-menu').querySelectorAll('button')];
+  const next = items.indexOf(document.activeElement) + (event.key === 'ArrowDown' ? 1 : -1);
+  items[(next + items.length) % items.length]?.focus();
+});
 // A drawer parked off-screen must not keep a resize's worth of stale state.
 window.addEventListener('resize', () => { if (!navIsDrawer()) setNavOpen(false); });
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
