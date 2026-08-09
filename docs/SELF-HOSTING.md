@@ -71,6 +71,14 @@ as long as it lasts, which is the current ceiling on concurrent users.
 limit Campfire answers `503` instead of accepting work it cannot carry. Raising
 them raises real memory and thread use, so measure before doing so.
 
+`CAMPFIRE_MAX_STORAGE_BYTES` caps what shared images may occupy and defaults to
+`0`, meaning no ceiling: imposing one on an instance that never asked for it
+would start refusing uploads that used to work. Set it to the space you are
+willing to give Campfire, leaving room for the database and its WAL. Past the
+ceiling, uploads are refused with `507` before their bytes are transferred;
+existing images are untouched. Community administrators can see usage, the
+ceiling, and what is actually on disk in the community settings screen.
+
 `CAMPFIRE_RETENTION_SWEEP_SECONDS` (default 3600, minimum 60) sets how often
 the retention sweep runs. Retention windows themselves are set per community in
 the interface, are measured in days, and default to keeping everything, so the

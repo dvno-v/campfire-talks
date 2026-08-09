@@ -35,7 +35,7 @@ does not lose data; all persistent data is documented.
 
 ## Milestone 2 — Community control and data lifecycle
 
-Status: in progress
+Status: complete
 
 - [x] Roles: owner, administrator, moderator, member
 - [x] Kick/ban with role hierarchy and invite re-entry prevention
@@ -47,7 +47,7 @@ Status: in progress
       self-service rather than operator-assisted; no operator step is needed)*
 - [x] Attachment deletion when its message is removed *(delivered with message
   deletion in Milestone 1)*
-- [ ] Storage quota and visible disk-usage reporting
+- [x] Storage quota and visible disk-usage reporting
 
 Exit criteria: a community owner can manage abuse and retention without editing
 SQLite manually, and deletion behavior is covered by integration tests.

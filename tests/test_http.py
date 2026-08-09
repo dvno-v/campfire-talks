@@ -878,6 +878,32 @@ class HTTPTests(unittest.TestCase):
             self.request("PATCH", f"/api/communities/{self.community_id}/retention",
                          {"message_days": 0, "attachment_days": 0}, cookie=self.owner_session)
 
+    def test_storage_reporting_and_the_upload_ceiling(self):
+        member = self.signed_in_user("http_storage_member")
+        status, _, _ = self.request("GET", "/api/storage", cookie=member)
+        self.assertEqual(status, 403)
+
+        status, report, _ = self.request("GET", "/api/storage", cookie=self.owner_session)
+        self.assertEqual(status, 200)
+        self.assertEqual(report["limit_bytes"], 0, "no ceiling is configured by default")
+        self.assertIsNone(report["available_bytes"])
+        self.assertIn(self.community_id, [entry["id"] for entry in report["communities"]])
+
+        original = campfire_http.MAX_STORAGE_BYTES
+        campfire_http.MAX_STORAGE_BYTES = 1
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            connection.request("POST", f"/api/channels/{self.channel_id}/uploads", b"x" * 64,
+                               {"Content-Type": "image/png", "Content-Length": "64",
+                                "Cookie": f"campfire_session={self.owner_session}"})
+            response = connection.getresponse()
+            payload = json.loads(response.read() or b"null")
+            connection.close()
+            self.assertEqual(response.status, 507)
+            self.assertIn("out of image storage", payload["error"])
+        finally:
+            campfire_http.MAX_STORAGE_BYTES = original
+
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)

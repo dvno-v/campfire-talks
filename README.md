@@ -9,6 +9,7 @@ and the browser receives live messages over Server-Sent Events.
 - Account registration, login, password changes, and remotely revocable sessions
 - Per-channel posting roles, slow mode, and image-upload controls
 - Per-community retention windows for messages and shared images
+- An optional image-storage ceiling with usage reporting for administrators
 - Self-service data export and account deletion, with owned communities passed
   on rather than orphaned
 - Invite-only registration after the first account
@@ -53,10 +54,10 @@ python3 -m unittest discover -s tests -v
 
 ## Near-term roadmap
 
-1. Channel permissions, slow mode, and upload controls
-2. Per-community retention settings and storage quota reporting
-3. PostgreSQL, Redis, and a WebSocket gateway for multi-instance deployment
-4. Voice rooms through a dedicated WebRTC SFU
+1. Versioned migrations, backup/restore commands, and a Docker deployment
+2. Health endpoints and configuration that fails closed for public exposure
+3. Voice rooms through a dedicated self-hosted WebRTC SFU
+4. Direct messages, reactions, replies, and search
 
 The maintained milestone plan and acceptance criteria live in
 [ROADMAP.md](ROADMAP.md).

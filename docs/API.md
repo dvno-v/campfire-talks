@@ -165,6 +165,24 @@ Accepts an empty JSON object. It applies the same hierarchy as kicking, removes
 the membership, and stores a persistent account ban. A banned account receives
 `403` from invite joining before the invite's use count changes.
 
+### `GET /api/storage`
+
+Returns `used_bytes` and `files` for every image the instance is storing,
+`limit_bytes` (0 when no ceiling is configured), `available_bytes` (null with
+no ceiling), `stored_bytes` for what the upload directory actually occupies,
+and a `communities` breakdown of the ones the caller owns or administers.
+Accounts that administer nothing receive `403`: disk usage is an operator's
+concern, and an ordinary member learning how much everyone has shared is not
+needed for the feature to work.
+
+`used_bytes` is summed from the attachment rows, which is also what the ceiling
+is enforced against, so the number reported and the number enforced are the
+same. `stored_bytes` is reported beside it because they should match, and
+saying both is how an operator finds out when they do not.
+
+An upload that would put the instance over `CAMPFIRE_MAX_STORAGE_BYTES` is
+refused with `507` before its body is read.
+
 ### `PATCH /api/communities/{community_id}/retention`
 
 ```json

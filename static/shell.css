@@ -425,3 +425,35 @@
 .sidebar header .community-name:not(:disabled):hover {
   color: var(--accent2);
 }
+
+/* ---------- Storage report ------------------------------------------------ */
+
+.storage-report {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.storage-bar {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  height: 10px;
+  overflow: hidden;
+}
+
+.storage-bar span {
+  background: linear-gradient(90deg, var(--accent2), var(--accent));
+  display: block;
+  height: 100%;
+}
+
+.storage-line {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.storage-drift {
+  color: var(--accent2);
+}

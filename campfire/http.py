@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .config import ACCESS_LOGS, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
+from .config import MAX_STORAGE_BYTES
 from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, RETENTION_SWEEP_SECONDS
 from .config import SECURE_COOKIES, STATIC_DIR, TRUSTED_PROXIES, UPLOAD_DIR
 from .database import connect, initialize_database, message_from_row, utc_now
@@ -46,6 +47,7 @@ from .services.notifications import NOTIFICATION_MODES, account_mode, channel_st
 from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
 from .services.retention import MAX_RETENTION_DAYS, purge_expired
 from .services.retention import set_retention as set_community_retention
+from .services.storage import directory_bytes, exceeds_limit, usage as storage_usage
 from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
@@ -177,6 +179,8 @@ class App(BaseHTTPRequestHandler):
             return self.unread_state()
         if path == "/api/sessions":
             return self.active_sessions()
+        if path == "/api/storage":
+            return self.storage_usage()
         if path == "/api/account/export":
             return self.export_account_data()
         if path == "/api/account/deletion":
@@ -418,6 +422,19 @@ class App(BaseHTTPRequestHandler):
     def expired_session_cookie(self):
         secure = "; Secure" if SECURE_COOKIES else ""
         return f"campfire_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{secure}"
+
+    def storage_usage(self):
+        """What the instance is storing, for the people who look after it."""
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as db:
+            report = storage_usage(db, user["id"], MAX_STORAGE_BYTES,
+                                   directory_bytes(UPLOAD_DIR))
+        if report is None:
+            return self.error(HTTPStatus.FORBIDDEN,
+                              "Only community administrators can see storage usage")
+        self.send_json(report)
 
     def export_account_data(self):
         user = self.require_user()
@@ -1047,6 +1064,11 @@ class App(BaseHTTPRequestHandler):
             if refusal:
                 self.close_connection = True
                 return refusal
+            if exceeds_limit(db, MAX_STORAGE_BYTES, length):
+                self.close_connection = True
+                return self.error(HTTPStatus.INSUFFICIENT_STORAGE,
+                                  "This instance is out of image storage. "
+                                  "Ask an administrator to free space or raise the limit")
         content = self.rfile.read(length)
         if len(content) != length:
             self.close_connection = True

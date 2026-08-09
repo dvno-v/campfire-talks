@@ -103,6 +103,11 @@ the button that asks for it, never on load and never as a side effect of
 signing in. Until you do, Campfire says so in the notification settings rather
 than leaving you to wonder why nothing appears.
 
+Storage reporting counts bytes and files, never who uploaded them. The
+per-community breakdown an administrator sees says how much a community holds,
+not which member contributed it, because the ceiling is about the disk rather
+than about anybody's behaviour.
+
 A community may set how long it keeps messages and how long it keeps shared
 images, in whole days. Both default to keeping everything, so an instance that
 never chooses is never quietly pruned. Images can be given the shorter window:

@@ -90,6 +90,11 @@ encrypted. A compromised host, browser, or administrator can read them.
   checks it before consuming an invite. The removed account receives only its
   own removal event; subsequent community events fail the normal membership
   check.
+- Image storage has an optional instance ceiling. It is checked before an
+  upload's body is read, so a refused upload is never carried across the
+  network first, and it is counted from the same attachment rows that
+  authorization and deletion use. Usage reporting requires administering at
+  least one community.
 - Retention windows are set per community by administrators and owners, are
   bounded to 0–3650 days, and default to keeping everything. The sweep runs on
   a timer off the request path and survives a failed pass rather than ending

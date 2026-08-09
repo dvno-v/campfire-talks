@@ -21,6 +21,7 @@ from campfire.services.communities import list_community_bans, list_community_me
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from campfire.services.retention import purge_expired, set_retention
+from campfire.services.storage import exceeds_limit, tracked_bytes, usage as storage_usage
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
 from campfire.services.notifications import set_account_mode, set_channel_mode
 
@@ -468,6 +469,43 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual(surviving, {ages["ancient"], ages["recent"]},
                          "words outlive the images when only images have a window")
         self.assertEqual(attachments, 0)
+
+    def test_storage_usage_is_administrator_visible_and_broken_down(self):
+        with database.connect() as db:
+            actors, community_id, channel_id = self.channel_fixture(db, "storage")
+            for index, size in enumerate((1000, 2500)):
+                db.execute("""INSERT INTO attachments
+                  (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+                  VALUES(?,?,?,?,?,?,?)""",
+                  (channel_id, actors["member"], f"storage_{index}.png", "photo.png",
+                   "image/png", size, database.utc_now()))
+            total, files = tracked_bytes(db)
+            self.assertGreaterEqual(total, 3500)
+
+            self.assertIsNone(storage_usage(db, actors["member"], 0),
+                              "disk usage is an operator's concern, not every member's")
+            self.assertIsNone(storage_usage(db, actors["moderator"], 0))
+            report = storage_usage(db, actors["administrator"], 10_000, stored_bytes=4096)
+            mine = [entry for entry in report["communities"] if entry["id"] == community_id]
+        self.assertEqual(report["limit_bytes"], 10_000)
+        self.assertEqual(report["available_bytes"], 10_000 - total)
+        self.assertEqual(report["stored_bytes"], 4096)
+        self.assertEqual(report["files"], files)
+        self.assertEqual([(entry["bytes"], entry["files"]) for entry in mine], [(3500, 2)])
+
+    def test_an_upload_past_the_ceiling_is_refused_and_no_limit_means_no_ceiling(self):
+        with database.connect() as db:
+            actors, _, channel_id = self.channel_fixture(db, "quota")
+            db.execute("""INSERT INTO attachments
+              (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (channel_id, actors["member"], "quota_0.png", "photo.png", "image/png",
+               1000, database.utc_now()))
+            used = tracked_bytes(db)[0]
+            self.assertFalse(exceeds_limit(db, 0, 10 ** 12),
+                             "a limit of zero is no limit, which is the default")
+            self.assertFalse(exceeds_limit(db, used + 100, 100))
+            self.assertTrue(exceeds_limit(db, used + 100, 101))
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

@@ -537,7 +537,7 @@ async function deleteMessage(message) {
   catch (error) { alert(error.message); }
 }
 function scrollMessages() { const list = $('#messages'); list.scrollTop = list.scrollHeight; }
-function formatBytes(value) { const bytes=Number(value)||0; return bytes < 1024*1024 ? `${Math.ceil(bytes/1024)} KB` : `${(bytes/1024/1024).toFixed(1)} MB`; }
+function formatBytes(value) { const bytes=Number(value)||0; if(bytes < 1024*1024) return `${Math.ceil(bytes/1024)} KB`; if(bytes < 1024*1024*1024) return `${(bytes/1024/1024).toFixed(1)} MB`; return `${(bytes/1024/1024/1024).toFixed(2)} GB`; }
 
 function setAuthMode(register) { registering = register; $('#auth-submit').textContent = registering ? 'Create account' : 'Sign in'; $('#auth-toggle').textContent = registering ? 'Already have an account? Sign in' : 'New here? Create an account'; $('#password').autocomplete = registering ? 'new-password' : 'current-password'; $('#invite-label').classList.toggle('hidden', !registering); }
 $('#auth-toggle').onclick = () => setAuthMode(!registering);
@@ -636,8 +636,30 @@ $('#community-name').onclick = () => {
   $('#attachment-retention').value = String(community.retention?.attachment_days ?? 0);
   $('#retention-status').textContent = ''; $('#retention-status').classList.remove('error');
   $('#community-dialog').showModal();
+  loadStorage();
 };
 $('#close-community').onclick = () => $('#community-dialog').close();
+
+async function loadStorage() {
+  const panel = $('#storage-report');
+  panel.innerHTML = '<p class="member-empty">Reading storage…</p>';
+  try {
+    const report = await api('/api/storage');
+    const used = Number(report.used_bytes) || 0, limit = Number(report.limit_bytes) || 0;
+    const share = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+    // Without a ceiling there is no proportion to draw, so say the total and
+    // how to set one rather than showing a bar against nothing.
+    const meter = limit
+      ? `<div class="storage-bar"><span style="width:${share}%"></span></div>
+         <p class="storage-line">${escapeHTML(formatBytes(used))} of ${escapeHTML(formatBytes(limit))} used · ${share}%</p>`
+      : `<p class="storage-line">${escapeHTML(formatBytes(used))} across ${Number(report.files)} image${Number(report.files) === 1 ? '' : 's'}. No limit is set; CAMPFIRE_MAX_STORAGE_BYTES sets one.</p>`;
+    const drift = report.stored_bytes !== null && Number(report.stored_bytes) !== used
+      ? `<p class="storage-line storage-drift">${escapeHTML(formatBytes(report.stored_bytes))} is actually on disk. A difference means files Campfire is not tracking.</p>` : '';
+    const rows = report.communities.map(entry =>
+      `<article class="invite-row"><div><strong>${escapeHTML(entry.name)}</strong><span>${escapeHTML(formatBytes(entry.bytes))} · ${Number(entry.files)} image${Number(entry.files) === 1 ? '' : 's'}</span></div></article>`).join('');
+    panel.innerHTML = meter + drift + rows;
+  } catch (error) { panel.innerHTML = `<p class="member-empty">${escapeHTML(error.message)}</p>`; }
+}
 $('#retention-form').onsubmit = async event => {
   event.preventDefault();
   const community = state.community; if (!community) return;

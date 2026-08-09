@@ -19,6 +19,9 @@ STATIC_DIR = PROJECT_ROOT / "static"
 DB_PATH = Path(os.environ.get("CAMPFIRE_DB", PROJECT_ROOT / "data" / "campfire.db"))
 UPLOAD_DIR = Path(os.environ.get("CAMPFIRE_UPLOAD_DIR", PROJECT_ROOT / "data" / "uploads"))
 MAX_UPLOAD_BYTES = max(1, int(os.environ.get("CAMPFIRE_MAX_UPLOAD_BYTES", str(8 * 1024 * 1024))))
+# Zero means no ceiling, which stays the default: imposing one on an instance
+# that never asked for it would start refusing uploads that used to work.
+MAX_STORAGE_BYTES = max(0, int(os.environ.get("CAMPFIRE_MAX_STORAGE_BYTES", "0")))
 SECURE_COOKIES = os.environ.get("CAMPFIRE_SECURE_COOKIES", "0") == "1"
 PUBLIC_ORIGIN = os.environ.get("CAMPFIRE_ORIGIN", "").rstrip("/")
 ACCESS_LOGS = os.environ.get("CAMPFIRE_ACCESS_LOG", "0") == "1"

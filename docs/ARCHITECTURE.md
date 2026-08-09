@@ -88,6 +88,7 @@ account; `services/communities.py` resolves
 the privilege ladder and owns membership removal and ban workflows,
 `services/channels.py` owns per-channel posting rules,
 `services/retention.py` owns scheduled deletion of expired history,
+`services/storage.py` owns disk accounting and the upload ceiling,
 `services/messages.py` decides who may edit or delete, and
 `services/notifications.py` decides what each account has read and wants told.
 The HTTP layer keeps the decision about which status code reveals what. Those
