@@ -933,9 +933,8 @@ class App(BaseHTTPRequestHandler):
             context = channel_context(db, channel_id, user["id"])
             if not context:
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
-            refusal = self.posting_refusal(db, context, user["id"], created)
-            if refusal:
-                return refusal
+            if self.refused_posting(db, context, user["id"], created):
+                return
             message_id = db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
                                     (channel_id, user["id"], body, created)).lastrowid
         message = {"id": message_id, "channel_id": channel_id, "body": body, "created_at": created,
@@ -944,22 +943,28 @@ class App(BaseHTTPRequestHandler):
         BROKER.publish({"type": "message.created", **message})
         self.send_json(message, HTTPStatus.CREATED)
 
-    def posting_refusal(self, db, context, user_id, now=None, uploading=False):
-        """Answer a contribution the channel's rules refuse, or return None.
+    def refused_posting(self, db, context, user_id, now=None, uploading=False):
+        """Answer a contribution the channel's rules refuse; True once answered.
+
+        Returns a boolean rather than the response, because `error` returns
+        None: a caller testing its result would send the refusal and then carry
+        on and do the thing anyway, answering one request twice.
 
         Each refusal says which rule stopped it. A composer that simply failed
         would leave someone retyping the same message into the same wall.
         """
         status, detail = may_post(db, context, user_id, uploading=uploading, now=now)
         if status == "role":
-            return self.error(HTTPStatus.FORBIDDEN,
-                              f"Only {detail}s and above can post in #{context['name']}")
-        if status == "uploads_disabled":
-            return self.error(HTTPStatus.FORBIDDEN, f"#{context['name']} does not accept images")
-        if status == "slow_mode":
-            return self.error(HTTPStatus.TOO_MANY_REQUESTS,
-                              f"Slow mode is on. Try again in {detail} second{'' if detail == 1 else 's'}")
-        return None
+            self.error(HTTPStatus.FORBIDDEN,
+                       f"Only {detail}s and above can post in #{context['name']}")
+        elif status == "uploads_disabled":
+            self.error(HTTPStatus.FORBIDDEN, f"#{context['name']} does not accept images")
+        elif status == "slow_mode":
+            self.error(HTTPStatus.TOO_MANY_REQUESTS,
+                       f"Slow mode is on. Try again in {detail} second{'' if detail == 1 else 's'}")
+        else:
+            return False
+        return True
 
     def update_channel(self, path):
         user = self.require_user()
@@ -1060,10 +1065,9 @@ class App(BaseHTTPRequestHandler):
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
             # Refuse before reading the body: an upload the channel will not
             # accept should not be carried across the network first.
-            refusal = self.posting_refusal(db, context, user["id"], uploading=True)
-            if refusal:
+            if self.refused_posting(db, context, user["id"], uploading=True):
                 self.close_connection = True
-                return refusal
+                return
             if exceeds_limit(db, MAX_STORAGE_BYTES, length):
                 self.close_connection = True
                 return self.error(HTTPStatus.INSUFFICIENT_STORAGE,

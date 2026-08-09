@@ -792,6 +792,8 @@ class HTTPTests(unittest.TestCase):
                                      "uploads_allowed": False}, cookie=member)
         self.assertEqual(status, 403, "a member cannot rewrite the rules they are held to")
 
+        with database.connect() as db:
+            attachments_before = db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0]
         status, updated, _ = self.request("PATCH", f"/api/channels/{self.channel_id}",
                                           {"post_min_role": "moderator", "slow_mode_seconds": 0,
                                            "uploads_allowed": False}, cookie=self.owner_session)
@@ -802,6 +804,12 @@ class HTTPTests(unittest.TestCase):
                                               {"body": "may i speak"}, cookie=member)
             self.assertEqual(status, 403)
             self.assertIn("moderator", payload["error"])
+            # A refusal that still writes would answer one request twice and
+            # store the very thing it just said no to.
+            with database.connect() as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE body=?",
+                                             ("may i speak",)).fetchone(),
+                                  "a refused message must not be stored anyway")
             # Reading is deliberately untouched by a posting rule.
             status, _, _ = self.request("GET", f"/api/channels/{self.channel_id}/messages",
                                         cookie=member)
@@ -816,6 +824,10 @@ class HTTPTests(unittest.TestCase):
             connection.close()
             self.assertEqual(response.status, 403)
             self.assertIn("does not accept images", body["error"])
+            with database.connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0],
+                                 attachments_before,
+                                 "a refused upload must not be stored anyway")
         finally:
             self.request("PATCH", f"/api/channels/{self.channel_id}",
                          {"post_min_role": "member", "slow_mode_seconds": 0,
@@ -833,6 +845,10 @@ class HTTPTests(unittest.TestCase):
                                               {"body": "second"}, cookie=member)
             self.assertEqual(status, 429)
             self.assertIn("Slow mode", payload["error"])
+            with database.connect() as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE body=?",
+                                             ("second",)).fetchone(),
+                                  "a message refused by slow mode must not be stored")
             # The owner is a moderator-or-above, so the same channel stays open to them.
             self.assertEqual(self.request("POST", f"/api/channels/{self.channel_id}/messages",
                                           {"body": "unhindered"}, cookie=self.owner_session)[0], 201)

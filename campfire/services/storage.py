@@ -60,7 +60,14 @@ def usage(database, actor_id, limit_bytes, stored_bytes=None):
 
 
 def directory_bytes(upload_dir):
-    """Bytes actually occupied by the upload directory, or None if unreadable."""
+    """Bytes actually occupied by the upload directory, or None if unreadable.
+
+    A directory that does not exist yet holds nothing, which is a real answer;
+    None is reserved for a directory that exists and could not be read, because
+    that is the case an operator needs to notice.
+    """
+    if not upload_dir.exists():
+        return 0
     try:
         return sum(path.stat().st_size for path in upload_dir.iterdir() if path.is_file())
     except OSError:
