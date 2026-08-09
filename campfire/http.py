@@ -31,6 +31,9 @@ from .security import session_hash, valid_invite
 from .services.accounts import change_password as change_account_password
 from .services.accounts import delete_account, deletion_plan, export_account
 from .services.accounts import list_sessions, revoke_session as revoke_account_session
+from .services.channels import MAX_SLOW_MODE_SECONDS, POSTING_ROLES, channel_context
+from .services.channels import may_post, settings_payload
+from .services.channels import update_settings as update_channel_settings
 from .services.communities import ASSIGNABLE_ROLES, community_role, has_role, is_banned, is_member
 from .services.communities import list_active_invites, list_community_bans, list_community_members
 from .services.communities import remove_member as remove_community_member
@@ -252,6 +255,10 @@ class App(BaseHTTPRequestHandler):
                 return self.set_notification_default()
             if path == "/api/account/password":
                 return self.change_password()
+            # Exactly /api/channels/{id}, so a longer channel path never lands
+            # here by having no suffix this route recognises.
+            if path.startswith("/api/channels/") and path.count("/") == 3:
+                return self.update_channel(path)
             if path.startswith("/api/messages/"):
                 return self.edit_message(path)
             if path.startswith("/api/communities/") and "/members/" in path:
@@ -468,6 +475,7 @@ class App(BaseHTTPRequestHandler):
         with connect() as db:
             rows = db.execute("""
               SELECT c.id community_id,c.name community_name,ch.id channel_id,ch.name channel_name,
+                ch.post_min_role,ch.slow_mode_seconds,ch.uploads_allowed,
                 CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END community_role
               FROM communities c JOIN memberships m ON m.community_id=c.id
               JOIN channels ch ON ch.community_id=c.id WHERE m.user_id=?
@@ -481,6 +489,7 @@ class App(BaseHTTPRequestHandler):
                 "id": row["community_id"], "name": row["community_name"],
                 "role": row["community_role"], "channels": []})
             community["channels"].append({"id": row["channel_id"], "name": row["channel_name"]}
+                                         | settings_payload(row)
                                          | self.channel_state_payload(states.get(row["channel_id"])))
         self.send_json({"user": user, "communities": list(communities.values()),
                         "notifications": {"default_mode": default_mode}})
@@ -757,9 +766,10 @@ class App(BaseHTTPRequestHandler):
                                         (community_id, name, utc_now())).lastrowid
             except sqlite3.IntegrityError:
                 return self.error(HTTPStatus.CONFLICT, "That channel already exists")
-        BROKER.publish({"type": "channel.created", "community_id": community_id,
-                        "id": channel_id, "name": name})
-        self.send_json({"id": channel_id, "name": name}, HTTPStatus.CREATED)
+        created = {"id": channel_id, "name": name, "post_min_role": "member",
+                   "slow_mode_seconds": 0, "uploads_allowed": True}
+        BROKER.publish({"type": "channel.created", "community_id": community_id} | created)
+        self.send_json(created, HTTPStatus.CREATED)
 
     def create_invite(self):
         user = self.require_user()
@@ -864,8 +874,12 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.BAD_REQUEST, "Message must be 1–4000 characters")
         created = utc_now()
         with connect() as db:
-            if not self.member_channel(db, channel_id, user["id"]):
+            context = channel_context(db, channel_id, user["id"])
+            if not context:
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
+            refusal = self.posting_refusal(db, context, user["id"], created)
+            if refusal:
+                return refusal
             message_id = db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
                                     (channel_id, user["id"], body, created)).lastrowid
         message = {"id": message_id, "channel_id": channel_id, "body": body, "created_at": created,
@@ -873,6 +887,49 @@ class App(BaseHTTPRequestHandler):
                    "attachment": None}
         BROKER.publish({"type": "message.created", **message})
         self.send_json(message, HTTPStatus.CREATED)
+
+    def posting_refusal(self, db, context, user_id, now=None, uploading=False):
+        """Answer a contribution the channel's rules refuse, or return None.
+
+        Each refusal says which rule stopped it. A composer that simply failed
+        would leave someone retyping the same message into the same wall.
+        """
+        status, detail = may_post(db, context, user_id, uploading=uploading, now=now)
+        if status == "role":
+            return self.error(HTTPStatus.FORBIDDEN,
+                              f"Only {detail}s and above can post in #{context['name']}")
+        if status == "uploads_disabled":
+            return self.error(HTTPStatus.FORBIDDEN, f"#{context['name']} does not accept images")
+        if status == "slow_mode":
+            return self.error(HTTPStatus.TOO_MANY_REQUESTS,
+                              f"Slow mode is on. Try again in {detail} second{'' if detail == 1 else 's'}")
+        return None
+
+    def update_channel(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        channel_id = self.channel_id_from(path)
+        if channel_id is None:
+            return
+        body = self.json_body()
+        try:
+            slow_mode = int(body.get("slow_mode_seconds", 0))
+        except (TypeError, ValueError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid slow mode")
+        with connect() as db:
+            updated = update_channel_settings(db, channel_id, user["id"],
+                                              str(body.get("post_min_role", "")), slow_mode,
+                                              bool(body.get("uploads_allowed", True)))
+        if updated is None:
+            return self.error(HTTPStatus.FORBIDDEN,
+                              "Only community administrators can change channel settings")
+        if updated is False:
+            return self.error(HTTPStatus.BAD_REQUEST,
+                              f"Posting role must be one of {', '.join(sorted(POSTING_ROLES))} "
+                              f"and slow mode 0–{MAX_SLOW_MODE_SECONDS} seconds")
+        BROKER.publish({"type": "channel.updated", **updated})
+        self.send_json(updated)
 
     def message_id_from(self, path):
         try:
@@ -941,9 +998,16 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                               f"Images must be no larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB")
         with connect() as db:
-            if not self.member_channel(db, channel_id, user["id"]):
+            context = channel_context(db, channel_id, user["id"])
+            if not context:
                 self.close_connection = True
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
+            # Refuse before reading the body: an upload the channel will not
+            # accept should not be carried across the network first.
+            refusal = self.posting_refusal(db, context, user["id"], uploading=True)
+            if refusal:
+                self.close_connection = True
+                return refusal
         content = self.rfile.read(length)
         if len(content) != length:
             self.close_connection = True

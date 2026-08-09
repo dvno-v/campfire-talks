@@ -14,6 +14,7 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Channel messages | Conversation history | Indefinite, until deleted by the author or a community moderator |
 | Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or a community moderator |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
+| Channel posting rules (minimum role, slow-mode seconds, uploads allowed) | Community moderation | Until the channel is deleted |
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
 
@@ -100,6 +101,11 @@ desktop. The browser is asked for notification permission only when you press
 the button that asks for it, never on load and never as a side effect of
 signing in. Until you do, Campfire says so in the notification settings rather
 than leaving you to wonder why nothing appears.
+
+A channel's posting rules are stored on the channel, not per account: Campfire
+records that a channel is in slow mode, never who was slowed by it or when. The
+wait is derived from the timestamp already on the author's last message, so
+enforcing it adds no new data about anybody.
 
 Only a community owner or administrator can list its active invite metadata.
 Campfire cannot display a previously created raw code because only its digest

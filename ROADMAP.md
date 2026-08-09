@@ -39,7 +39,8 @@ Status: in progress
 
 - [x] Roles: owner, administrator, moderator, member
 - [x] Kick/ban with role hierarchy and invite re-entry prevention
-- [ ] Channel permissions, slow mode, and upload controls
+- [x] Channel permissions, slow mode, and upload controls *(contribution
+      rules; per-channel read restrictions are deferred to a later milestone)*
 - [x] Account password change, active-session list, and remote session revocation
 - [ ] Per-community message and attachment retention settings
 - [x] User account deletion and self-service data export *(export is

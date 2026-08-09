@@ -86,6 +86,7 @@ security are extracted domain services. `services/accounts.py` owns password
 replacement, session listing/revocation, and the export and deletion of a whole
 account; `services/communities.py` resolves
 the privilege ladder and owns membership removal and ban workflows,
+`services/channels.py` owns per-channel posting rules,
 `services/messages.py` decides who may edit or delete, and
 `services/notifications.py` decides what each account has read and wants told.
 The HTTP layer keeps the decision about which status code reveals what. Those

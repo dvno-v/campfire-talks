@@ -14,6 +14,8 @@ os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 from campfire import database, realtime, security, uploads
 from campfire.services.accounts import change_password, delete_account, deletion_plan
 from campfire.services.accounts import export_account, list_sessions, revoke_session
+from campfire.services.channels import channel_context, may_post, slow_mode_remaining
+from campfire.services.channels import update_settings as update_channel_settings
 from campfire.services.communities import community_role, has_role, is_banned, list_active_invites
 from campfire.services.communities import list_community_bans, list_community_members, remove_member
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
@@ -343,6 +345,65 @@ class CampfireTests(unittest.TestCase):
                       "only the removed member's own invites are revoked")
         self.assertIn(invites["far"], surviving,
                       "a community they still belong to is not this one's business")
+
+    def channel_fixture(self, db, label):
+        """An owner, an administrator, a moderator and a member around one channel."""
+        actors = {}
+        for role in ("owner", "administrator", "moderator", "member"):
+            actors[role] = db.execute(
+                "INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                (f"{label}_{role}", "unused", database.utc_now())).lastrowid
+        community_id = db.execute("INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                                  (label, actors["owner"], database.utc_now())).lastrowid
+        for role, user_id in actors.items():
+            db.execute("INSERT INTO memberships(community_id,user_id,role) VALUES(?,?,?)",
+                       (community_id, user_id, role if role != "owner" else "member"))
+        channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                                (community_id, "general", database.utc_now())).lastrowid
+        return actors, community_id, channel_id
+
+    def test_a_channel_can_restrict_posting_to_a_role(self):
+        with database.connect() as db:
+            actors, _, channel_id = self.channel_fixture(db, "posting_rules")
+            self.assertIsNone(update_channel_settings(db, channel_id, actors["moderator"],
+                                                      "moderator", 0, True),
+                              "a moderator does not administer channels")
+            self.assertIs(update_channel_settings(db, channel_id, actors["owner"],
+                                                  "emperor", 0, True), False)
+            self.assertIs(update_channel_settings(db, channel_id, actors["owner"],
+                                                  "member", 9999, True), False)
+            updated = update_channel_settings(db, channel_id, actors["administrator"],
+                                              "moderator", 0, False)
+            self.assertEqual(updated["post_min_role"], "moderator")
+
+            for role, expected in (("member", "role"), ("moderator", "ok"),
+                                   ("administrator", "ok"), ("owner", "ok")):
+                context = channel_context(db, channel_id, actors[role])
+                self.assertEqual(may_post(db, context, actors[role])[0], expected, role)
+            # Reading is untouched by a posting rule.
+            self.assertIsNotNone(channel_context(db, channel_id, actors["member"]))
+            self.assertEqual(may_post(db, channel_context(db, channel_id, actors["owner"]),
+                                      actors["owner"], uploading=True)[0], "uploads_disabled")
+
+    def test_slow_mode_counts_from_the_last_message_and_spares_moderators(self):
+        with database.connect() as db:
+            actors, _, channel_id = self.channel_fixture(db, "slow_mode")
+            update_channel_settings(db, channel_id, actors["owner"], "member", 30, True)
+            for role in ("member", "moderator"):
+                db.execute("INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                           (channel_id, actors[role], "first", "2026-08-09T12:00:00Z"))
+
+            member = channel_context(db, channel_id, actors["member"])
+            self.assertEqual(slow_mode_remaining(db, member, actors["member"],
+                                                 now="2026-08-09T12:00:10Z"), 20)
+            self.assertEqual(may_post(db, member, actors["member"], now="2026-08-09T12:00:10Z"),
+                             ("slow_mode", 20))
+            self.assertEqual(may_post(db, member, actors["member"], now="2026-08-09T12:00:30Z"),
+                             ("ok", None))
+
+            moderator = channel_context(db, channel_id, actors["moderator"])
+            self.assertEqual(may_post(db, moderator, actors["moderator"], now="2026-08-09T12:00:10Z"),
+                             ("ok", None), "moderators answer floods, so slow mode spares them")
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

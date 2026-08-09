@@ -90,6 +90,14 @@ encrypted. A compromised host, browser, or administrator can read them.
   checks it before consuming an invite. The removed account receives only its
   own removal event; subsequent community events fail the normal membership
   check.
+- Channels carry their own posting rules: a minimum role to contribute, a slow
+  mode measured from the author's last message in that channel, and whether
+  images are accepted. All three are enforced server-side on both the message
+  and upload paths, and an upload is refused before its body is read. They
+  restrict contributing, not reading: every member of a community can still
+  read every one of its channels, and that boundary is stated rather than
+  implied because a rule enforced in three places out of four is worse than no
+  rule at all.
 - Editing a message requires authorship; deleting one requires authorship or a
   moderator-or-higher role. Elevated roles deliberately do not grant the right
   to rewrite another member's words, only to remove them. Non-members receive

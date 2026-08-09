@@ -7,6 +7,7 @@ and the browser receives live messages over Server-Sent Events.
 ## Included in the MVP
 
 - Account registration, login, password changes, and remotely revocable sessions
+- Per-channel posting roles, slow mode, and image-upload controls
 - Self-service data export and account deletion, with owned communities passed
   on rather than orphaned
 - Invite-only registration after the first account

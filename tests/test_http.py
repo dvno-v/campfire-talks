@@ -785,6 +785,62 @@ class HTTPTests(unittest.TestCase):
             self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE id=?", (message_id,)).fetchone())
             self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE user_id=?", (user_id,)).fetchone())
 
+    def test_channel_rules_are_enforced_on_posting_and_uploading(self):
+        member = self.signed_in_user("http_rules_member")
+        status, _, _ = self.request("PATCH", f"/api/channels/{self.channel_id}",
+                                    {"post_min_role": "moderator", "slow_mode_seconds": 0,
+                                     "uploads_allowed": False}, cookie=member)
+        self.assertEqual(status, 403, "a member cannot rewrite the rules they are held to")
+
+        status, updated, _ = self.request("PATCH", f"/api/channels/{self.channel_id}",
+                                          {"post_min_role": "moderator", "slow_mode_seconds": 0,
+                                           "uploads_allowed": False}, cookie=self.owner_session)
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["post_min_role"], "moderator")
+        try:
+            status, payload, _ = self.request("POST", f"/api/channels/{self.channel_id}/messages",
+                                              {"body": "may i speak"}, cookie=member)
+            self.assertEqual(status, 403)
+            self.assertIn("moderator", payload["error"])
+            # Reading is deliberately untouched by a posting rule.
+            status, _, _ = self.request("GET", f"/api/channels/{self.channel_id}/messages",
+                                        cookie=member)
+            self.assertEqual(status, 200)
+
+            connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            connection.request("POST", f"/api/channels/{self.channel_id}/uploads", b"x" * 8,
+                               {"Content-Type": "image/png", "Content-Length": "8",
+                                "Cookie": f"campfire_session={self.owner_session}"})
+            response = connection.getresponse()
+            body = json.loads(response.read() or b"null")
+            connection.close()
+            self.assertEqual(response.status, 403)
+            self.assertIn("does not accept images", body["error"])
+        finally:
+            self.request("PATCH", f"/api/channels/{self.channel_id}",
+                         {"post_min_role": "member", "slow_mode_seconds": 0,
+                          "uploads_allowed": True}, cookie=self.owner_session)
+
+    def test_slow_mode_refuses_a_second_message_with_the_wait(self):
+        member = self.signed_in_user("http_slow_member")
+        self.request("PATCH", f"/api/channels/{self.channel_id}",
+                     {"post_min_role": "member", "slow_mode_seconds": 60,
+                      "uploads_allowed": True}, cookie=self.owner_session)
+        try:
+            self.assertEqual(self.request("POST", f"/api/channels/{self.channel_id}/messages",
+                                          {"body": "first"}, cookie=member)[0], 201)
+            status, payload, _ = self.request("POST", f"/api/channels/{self.channel_id}/messages",
+                                              {"body": "second"}, cookie=member)
+            self.assertEqual(status, 429)
+            self.assertIn("Slow mode", payload["error"])
+            # The owner is a moderator-or-above, so the same channel stays open to them.
+            self.assertEqual(self.request("POST", f"/api/channels/{self.channel_id}/messages",
+                                          {"body": "unhindered"}, cookie=self.owner_session)[0], 201)
+        finally:
+            self.request("PATCH", f"/api/channels/{self.channel_id}",
+                         {"post_min_role": "member", "slow_mode_seconds": 0,
+                          "uploads_allowed": True}, cookie=self.owner_session)
+
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)

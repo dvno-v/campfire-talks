@@ -75,6 +75,10 @@ def initialize_database():
         CREATE TABLE IF NOT EXISTS channels (
           id INTEGER PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
           name TEXT NOT NULL, created_at TEXT NOT NULL,
+          post_min_role TEXT NOT NULL DEFAULT 'member'
+            CHECK (post_min_role IN ('administrator', 'moderator', 'member')),
+          slow_mode_seconds INTEGER NOT NULL DEFAULT 0 CHECK (slow_mode_seconds >= 0),
+          uploads_allowed INTEGER NOT NULL DEFAULT 1 CHECK (uploads_allowed IN (0, 1)),
           UNIQUE (community_id, name)
         );
         CREATE TABLE IF NOT EXISTS messages (
@@ -136,6 +140,17 @@ def initialize_database():
             database.execute("UPDATE sessions SET created_at=? WHERE created_at IS NULL", (utc_now(),))
         if "id" not in session_columns:
             rebuild_sessions_with_stable_ids(database)
+        channel_columns = {row[1] for row in database.execute("PRAGMA table_info(channels)")}
+        if "post_min_role" not in channel_columns:
+            database.execute("ALTER TABLE channels ADD COLUMN post_min_role TEXT NOT NULL "
+                             "DEFAULT 'member' "
+                             "CHECK (post_min_role IN ('administrator', 'moderator', 'member'))")
+        if "slow_mode_seconds" not in channel_columns:
+            database.execute("ALTER TABLE channels ADD COLUMN slow_mode_seconds "
+                             "INTEGER NOT NULL DEFAULT 0 CHECK (slow_mode_seconds >= 0)")
+        if "uploads_allowed" not in channel_columns:
+            database.execute("ALTER TABLE channels ADD COLUMN uploads_allowed "
+                             "INTEGER NOT NULL DEFAULT 1 CHECK (uploads_allowed IN (0, 1))")
         enforce_username_case_uniqueness(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))

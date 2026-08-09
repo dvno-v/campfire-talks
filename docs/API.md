@@ -165,6 +165,27 @@ Accepts an empty JSON object. It applies the same hierarchy as kicking, removes
 the membership, and stores a persistent account ban. A banned account receives
 `403` from invite joining before the invite's use count changes.
 
+### `PATCH /api/channels/{channel_id}`
+
+```json
+{"post_min_role": "moderator", "slow_mode_seconds": 30, "uploads_allowed": true}
+```
+
+Community administrators and owners only; everyone else receives `403`, as does
+a channel in a community the caller does not belong to. `post_min_role` is one
+of `member`, `moderator`, `administrator`; `slow_mode_seconds` is 0–300;
+`uploads_allowed` refuses images for the channel when false. The response
+repeats the stored rules and a `channel.updated` event carries them to every
+member. These rules govern contributing only — every member of the community
+can still read every channel.
+
+Posting below the required role returns `403`, uploading to a channel that
+refuses images returns `403`, and posting inside a slow-mode window returns
+`429` naming the seconds still to wait. Slow mode does not apply to moderators
+and above. Channel rules also travel on `GET /api/bootstrap` and on
+`channel.created`, so a client can disable its composer rather than discover
+the rule by being refused.
+
 ### `GET /api/communities/{community_id}/bans`
 
 Moderators and above receive the banned account's ID and username, its role at

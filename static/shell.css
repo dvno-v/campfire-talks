@@ -353,3 +353,54 @@
     font-size: 16px;
   }
 }
+
+/* ---------- Channel rules dialog ----------------------------------------- */
+
+.channel-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.channel-form label {
+  color: #c8c7ce;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.channel-form select {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  display: block;
+  margin-top: 7px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.channel-form .muted {
+  font-size: 13px;
+  margin: -4px 0 0;
+}
+
+.channel-toggle {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.channel-toggle input {
+  height: 18px;
+  width: 18px;
+}
+
+#channel-settings {
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+#channel-settings:hover {
+  color: var(--ink);
+}

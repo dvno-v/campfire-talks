@@ -57,6 +57,7 @@ async function enterApp() {
     if (event.type === 'member.updated') return applyMemberUpdated(event);
     if (event.type === 'member.removed') return applyMemberRemoved(event);
     if (event.type === 'channel.created') return applyChannelCreated(event);
+    if (event.type === 'channel.updated') return rememberChannelRules(event);
     if (event.type === 'message.created') countUnread(event);
     if (event.type === 'message.deleted') discountUnread(event);
     if (event.channel_id !== state.channel?.id) return;
@@ -331,6 +332,7 @@ function applyMemberJoined(event) {
 }
 
 function applyMemberUpdated(event) {
+  if (Number(event.id) === state.user?.id) setTimeout(applyChannelRules, 0);
   const community = state.communities.find(entry => entry.id === Number(event.community_id));
   if (community && event.member.id === state.user?.id) community.role = event.member.role;
   if (event.community_id !== state.community?.id) return;
@@ -379,8 +381,41 @@ function resyncChannel() { if (state.channel) selectChannel(state.channel); }
 function applyChannelCreated(event) {
   const community = state.communities.find(c => c.id === event.community_id);
   if (!community || community.channels.some(channel => channel.id === event.id)) return;
-  community.channels.push({ id: event.id, name: event.name });
+  community.channels.push({ id: event.id, name: event.name,
+    post_min_role: event.post_min_role, slow_mode_seconds: event.slow_mode_seconds,
+    uploads_allowed: event.uploads_allowed });
   if (community.id === state.community?.id) renderChannels();
+}
+
+// The composer says what the channel allows rather than failing on send. The
+// server decides either way; this only saves someone typing into a wall.
+function applyChannelRules() {
+  const channel = state.channel;
+  $('#channel-settings').classList.toggle('hidden',
+    !channel || !['owner', 'administrator'].includes(currentCommunityRole()));
+  if (!channel) return;
+  const allowed = roleRank(currentCommunityRole()) >= roleRank(channel.post_min_role || 'member');
+  const slow = Number(channel.slow_mode_seconds) || 0;
+  $('#message').disabled = !allowed;
+  $('#upload-button').disabled = !allowed || channel.uploads_allowed === false;
+  $('#message').placeholder = allowed
+    ? (slow ? `Message #${channel.name} — slow mode, ${slowModeLabel(slow)}` : `Message #${channel.name}`)
+    : `Only ${channel.post_min_role}s and above can post here`;
+}
+
+function slowModeLabel(seconds) {
+  return seconds % 60 === 0 && seconds >= 60
+    ? `${seconds / 60} minute${seconds === 60 ? '' : 's'}` : `${seconds} seconds`;
+}
+
+// A channel object lives in two places: the community's list and state.channel.
+function rememberChannelRules(updated) {
+  const community = state.communities.find(entry => entry.id === Number(updated.community_id));
+  const channel = community?.channels.find(entry => entry.id === Number(updated.id));
+  const rules = { post_min_role: updated.post_min_role, slow_mode_seconds: updated.slow_mode_seconds,
+                  uploads_allowed: updated.uploads_allowed };
+  if (channel) Object.assign(channel, rules);
+  if (state.channel?.id === Number(updated.id)) { Object.assign(state.channel, rules); applyChannelRules(); }
 }
 
 function currentCommunityRole() { return state.community?.role || state.members.find(member => member.id === state.user?.id)?.role || 'member'; }
@@ -396,13 +431,14 @@ async function selectChannel(channel) {
   state.channel = channel; state.unreadBoundary = false;
   if (!channel) {
     $('#channel-name').textContent = '';
+    applyChannelRules();
     $('#message').placeholder = 'Choose or create a community'; $('#message').disabled = true;
     $('#upload-button').disabled = true;
     state.messages.clear(); $('#messages').innerHTML = '<div class="empty"><div>C</div><h2>No community selected</h2><p>Create one or join with an invite.</p></div>';
     return;
   }
-  $('#message').disabled = false; $('#upload-button').disabled = false;
-  $('#channel-name').textContent = channel.name; $('#message').placeholder = `Message #${channel.name}`;
+  $('#channel-name').textContent = channel.name;
+  applyChannelRules();
   renderChannels();
   // Read the marker before anything clears it: it decides where the divider goes.
   const marker = channelState(channel.id).last_read_message_id;
@@ -572,6 +608,32 @@ $('#delete-account-form').onsubmit = async event => {
     event.currentTarget.reset(); showAuth();
   } catch(error){status.classList.add('error');status.textContent=error.message;}
   finally{button.disabled=false;}
+};
+$('#channel-settings').onclick = () => {
+  const channel = state.channel; if (!channel) return;
+  closeNavOnDrawer();
+  $('#channel-dialog-name').textContent = `#${channel.name}`;
+  $('#post-min-role').value = channel.post_min_role || 'member';
+  $('#slow-mode').value = String(Number(channel.slow_mode_seconds) || 0);
+  $('#uploads-allowed').checked = channel.uploads_allowed !== false;
+  $('#channel-status').textContent = ''; $('#channel-status').classList.remove('error');
+  $('#channel-dialog').showModal();
+};
+$('#close-channel').onclick = () => $('#channel-dialog').close();
+$('#channel-form').onsubmit = async event => {
+  event.preventDefault();
+  const channel = state.channel; if (!channel) return;
+  const status = $('#channel-status'); status.classList.remove('error'); status.textContent = '';
+  const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
+  try {
+    const updated = await api(`/api/channels/${Number(channel.id)}`, { method: 'PATCH',
+      body: JSON.stringify({ post_min_role: $('#post-min-role').value,
+        slow_mode_seconds: Number($('#slow-mode').value),
+        uploads_allowed: $('#uploads-allowed').checked }) });
+    rememberChannelRules(updated);
+    $('#channel-dialog').close();
+  } catch (error) { status.classList.add('error'); status.textContent = error.message; }
+  finally { button.disabled = false; }
 };
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
 $('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
