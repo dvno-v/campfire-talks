@@ -1,0 +1,358 @@
+/* The responsive application shell.
+   Loaded last so it can override any panel stylesheet.
+
+   Campfire's three columns — communities, channels, conversation — do not fit
+   on a phone. They are not dropped there: below 760px the first two slide over
+   the conversation as one drawer, so every control the sidebars carry
+   (communities, channels, invites, bans, notifications, account, sign-out)
+   stays reachable instead of being hidden with `display: none`. */
+
+.nav-toggle {
+  display: none;
+}
+
+.nav-scrim {
+  display: none;
+}
+
+/* ---------- Ember identity ---------------------------------------------- */
+
+/* The accent is the point of the name: warm light on the active thing, and a
+   lit edge rather than a flat grey block. */
+.channel {
+  padding-left: 14px;
+  position: relative;
+  transition: background .14s ease, color .14s ease;
+}
+
+.channel.active {
+  background: linear-gradient(90deg, #ee6a4b1f, #ffffff08 60%);
+  color: var(--ink);
+}
+
+.channel.active::after {
+  background: linear-gradient(180deg, var(--accent2), var(--accent));
+  border-radius: 3px;
+  bottom: 7px;
+  content: '';
+  left: 5px;
+  position: absolute;
+  top: 7px;
+  width: 3px;
+}
+
+.community-icon.active {
+  box-shadow: 0 0 0 2px #17181c, 0 0 0 4px var(--accent), 0 8px 22px #ee6a4b40;
+}
+
+.chat-header {
+  background: linear-gradient(180deg, #ffffff05, transparent);
+}
+
+.chat-topic {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Both of these declare `grid-template-rows` but no columns, so their single
+   implicit column is `auto` and resolves to the widest row's max-content —
+   wider than the panel itself once the header's controls stop fitting. The
+   panel paints its own background at its real width, so the header and footer
+   paint theirs past the edge. Pinning the column to the container's width
+   fixes the overflow and lets the shrink rules below take effect. */
+.sidebar,
+.chat {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* A community may be named anything at all, so the name yields and the
+   controls beside it keep their row rather than wrapping under it. */
+.sidebar header {
+  gap: 8px;
+}
+
+/* Same for a channel: the name gives way rather than pushing the member
+   toggle out of the header. */
+#community-name,
+#channel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-actions {
+  align-items: center;
+  display: flex;
+  flex: none;
+}
+
+/* ---------- Reachable controls on touch --------------------------------- */
+
+/* A finger is not a mouse pointer: anything a person must hit gets a real
+   target, even where the label stays small. Narrow viewports are included
+   alongside coarse pointers because a phone is the common case and a desktop
+   window dragged that small loses nothing by having roomier controls. */
+@media (max-width: 900px), (pointer: coarse) {
+  .sidebar footer button,
+  .members-panel header button,
+  .invite-dialog header button,
+  .composer button {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 42px;
+    min-width: 42px;
+  }
+
+  /* Four controls share the sidebar header with the community name, so these
+     grow to a comfortable height without taking the width to match. */
+  .sidebar header button {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 42px;
+    min-width: 34px;
+  }
+
+  .channel {
+    padding: 12px 10px 12px 16px;
+  }
+
+  .member-actions button {
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+
+  .member-role-select {
+    font-size: 12px;
+    padding: 6px 8px;
+  }
+
+  .invite-row button {
+    padding: 11px 14px;
+  }
+
+  .message-actions button {
+    font-size: 13px;
+    padding: 8px 12px;
+  }
+}
+
+/* ---------- The drawer --------------------------------------------------- */
+
+/* 760px, not 900px: a tablet in portrait still has room for the rail, the
+   channel list and a readable conversation side by side, and taking that away
+   would be a downgrade for it. Below this the three columns stop fitting. */
+@media (max-width: 760px) {
+  .app,
+  .app.members-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .nav-toggle {
+    background: none;
+    border-radius: 9px;
+    color: var(--muted);
+    display: grid;
+    flex: none;
+    height: 40px;
+    margin-left: -6px;
+    place-items: center;
+    width: 40px;
+  }
+
+  .nav-toggle:hover {
+    color: var(--ink);
+  }
+
+  /* `visibility: hidden` and not opacity alone: a drawer parked off-screen
+     must also be out of reach of the keyboard and a screen reader. */
+  .rail,
+  .sidebar {
+    bottom: 0;
+    position: fixed;
+    top: 0;
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+    visibility: hidden;
+    z-index: 30;
+  }
+
+  .rail {
+    left: 0;
+    width: 64px;
+  }
+
+  /* Wide enough that the community name still reads next to its four controls,
+     leaving a strip of the conversation showing so it is clear that tapping
+     outside closes the drawer. */
+  .sidebar {
+    box-shadow: 24px 0 60px #0009;
+    left: 64px;
+    width: min(280px, calc(100vw - 96px));
+  }
+
+  .app.nav-open .rail,
+  .app.nav-open .sidebar {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  .nav-scrim {
+    background: #07080b99;
+    display: block;
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: fixed;
+    transition: opacity .22s ease;
+    z-index: 25;
+  }
+
+  .app.nav-open .nav-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rail,
+    .sidebar,
+    .nav-scrim {
+      transition: none;
+    }
+  }
+}
+
+/* ---------- Phone layout ------------------------------------------------- */
+
+@media (max-width: 700px) {
+  .chat-header {
+    gap: 8px;
+    padding: 0 12px;
+  }
+
+  .chat-topic {
+    display: none;
+  }
+
+  .chat-header b {
+    font-size: 20px;
+  }
+
+  #channel-name {
+    font-size: 17px;
+  }
+
+  .messages {
+    padding: 16px 14px 8px;
+  }
+
+  .message-row {
+    gap: 10px;
+    grid-template-columns: 36px minmax(0, 1fr);
+    margin: 14px 0;
+  }
+
+  .message-avatar {
+    height: 36px;
+    width: 36px;
+  }
+
+  /* The home indicator sits over the bottom edge on a modern phone. */
+  .composer {
+    margin: 0 10px calc(10px + env(safe-area-inset-bottom));
+  }
+
+  /* Under 16px iOS zooms the whole page when the field takes focus, and the
+     layout never recovers. */
+  .composer textarea {
+    font-size: 16px;
+  }
+
+  .rail {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .sidebar footer {
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ---------- Dialogs become sheets ---------------------------------------- */
+
+/* A centred card on a phone is a card with nowhere to go: it overflows at the
+   top and bottom at once. Anchoring to the bottom edge gives it a fixed side
+   to grow from and puts its controls under the thumb. */
+@media (max-width: 700px) {
+  .invite-dialog {
+    margin: auto auto 0;
+    max-height: 92dvh;
+    max-width: none;
+    width: 100%;
+  }
+
+  .invite-dialog > section,
+  .account-dialog > section {
+    border-bottom: 0;
+    border-radius: 20px 20px 0 0;
+    max-height: 92dvh;
+    overflow-y: auto;
+    padding: 20px 18px calc(24px + env(safe-area-inset-bottom));
+  }
+
+  /* A long sheet must not scroll its own close button away. The negative
+     margins pull the header over the section's padding so its background
+     covers the full width once it sticks, rather than letting content scroll
+     through the gap beside it. */
+  .invite-dialog header {
+    background: var(--panel);
+    margin: -20px -18px 0;
+    padding: 20px 18px 10px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+
+  .invite-list {
+    max-height: none;
+  }
+
+  .invite-row {
+    gap: 10px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .invite-row button {
+    justify-self: start;
+  }
+}
+
+/* ---------- Sign-in ------------------------------------------------------ */
+
+/* `body` cannot scroll, so a short screen would otherwise clip the register
+   form's extra invite field with no way to reach the button. */
+.auth-shell {
+  overflow-y: auto;
+}
+
+@media (max-width: 700px) {
+  .auth-shell {
+    align-items: start;
+    padding: 16px 14px calc(24px + env(safe-area-inset-bottom));
+  }
+
+  .auth-card {
+    border-radius: 18px;
+    padding: 28px 22px;
+  }
+
+  .auth-card h1 {
+    font-size: 28px;
+  }
+
+  .auth-card input {
+    font-size: 16px;
+  }
+}

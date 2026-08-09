@@ -24,7 +24,8 @@ and the browser receives live messages over Server-Sent Events.
 - Per-channel unread markers, a “new messages” divider, and account-wide or
   per-channel notification preferences
 - Rate-limited authentication and restrictive browser security headers
-- Responsive three-panel chat UI
+- Three-panel chat UI on a desktop that folds down to a phone: the community
+  and channel panels become a slide-over drawer rather than disappearing
 
 ## Run it
 

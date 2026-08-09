@@ -22,11 +22,18 @@
   pointer-events: auto;
 }
 
-/* Without hover there is no other way to reach these controls. */
+/* Without hover there is no other way to reach these controls, so they stay
+   visible. Floating them over the row would then permanently cover the author
+   and timestamp they sit on, so on touch they drop into the flow beneath the
+   message instead. */
 @media (hover: none) {
   .message-actions {
+    grid-column: 2;
+    justify-self: start;
+    margin-top: 7px;
     opacity: 1;
     pointer-events: auto;
+    position: static;
   }
 }
 

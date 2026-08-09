@@ -15,6 +15,7 @@ const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (character) => HTML_ESCAPES[character]); }
 function showAuth() {
   state.eventSource?.close(); state.eventSource = null; state.user = null;
+  setNavOpen(false); $('#members-panel').classList.remove('open');
   if ($('#account-dialog').open) $('#account-dialog').close();
   $('#password-form').reset(); $('#delete-account-form').reset();
   $('#auth').classList.remove('hidden'); $('#app').classList.add('hidden');
@@ -92,7 +93,9 @@ function renderChannels() {
     const badge = unread && !muted ? `<span class="channel-badge">${unread > 99 ? '99+' : unread}</span>` : '';
     return `<button class="channel ${c.id === state.channel?.id ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}" data-id="${c.id}">${escapeHTML(c.name)}${badge}</button>`;
   }).join('');
-  document.querySelectorAll('.channel').forEach(button => button.onclick = () => selectChannel(community.channels.find(c => c.id === +button.dataset.id)));
+  // Picking a channel is what the drawer was opened for, so it gets out of the
+  // way. Picking a community does not: the channel list is the next choice.
+  document.querySelectorAll('.channel').forEach(button => button.onclick = () => { selectChannel(community.channels.find(c => c.id === +button.dataset.id)); closeNavOnDrawer(); });
 }
 
 function channelState(channelId) { return state.unread.get(Number(channelId)) || { unread: 0, last_read_message_id: 0, notify: null }; }
@@ -190,6 +193,7 @@ function openChannel(channelId) {
   if (!community) return;
   if (community.id !== state.community?.id) selectCommunity(community);
   selectChannel(community.channels.find(channel => channel.id === Number(channelId)));
+  closeNavOnDrawer();
 }
 
 async function loadMembers(communityId) {
@@ -403,11 +407,28 @@ $('#message-form').onsubmit = sendMessage;
 $('#message').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(event); } };
 async function sendMessage(event) { event.preventDefault(); const input=$('#message'), body=input.value.trim(); if(!body || !state.channel)return; input.value=''; try { const message=await api(`/api/channels/${state.channel.id}/messages`,{method:'POST',body:JSON.stringify({body})}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); readActiveChannel(); } catch(error){ input.value=body; alert(error.message); } }
 $('#upload-button').onclick = () => state.channel && $('#file-input').click();
-$('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-width: 1100px)').matches; if(compact) $('#members-panel').classList.toggle('open'); else $('#app').classList.toggle('members-hidden'); const visible=compact?$('#members-panel').classList.contains('open'):!$('#app').classList.contains('members-hidden'); $('#toggle-members').setAttribute('aria-expanded',String(visible)); };
+$('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-width: 1100px)').matches; if(compact){ setNavOpen(false); $('#members-panel').classList.toggle('open'); } else $('#app').classList.toggle('members-hidden'); const visible=compact?$('#members-panel').classList.contains('open'):!$('#app').classList.contains('members-hidden'); $('#toggle-members').setAttribute('aria-expanded',String(visible)); };
 $('#close-members').onclick = () => { $('#members-panel').classList.remove('open'); $('#toggle-members').setAttribute('aria-expanded','false'); };
+
+// Below 900px the community rail and channel list slide over the conversation.
+// Everything they carry — communities, channels, invites, bans, notifications,
+// account settings, sign-out — is only reachable through here on a phone.
+function navIsDrawer() { return window.matchMedia('(max-width: 760px)').matches; }
+function setNavOpen(open) {
+  // The scrim's visibility is the class's job, not an attribute's: `hidden`
+  // would cut the fade short, and CSS `display` overrides it anyway.
+  $('#app').classList.toggle('nav-open', open);
+  $('#toggle-nav').setAttribute('aria-expanded', String(open));
+}
+function closeNavOnDrawer() { if (navIsDrawer()) setNavOpen(false); }
+$('#toggle-nav').onclick = () => { $('#members-panel').classList.remove('open'); setNavOpen(!$('#app').classList.contains('nav-open')); };
+$('#nav-scrim').onclick = () => setNavOpen(false);
+document.addEventListener('keydown', event => { if (event.key === 'Escape') { setNavOpen(false); $('#members-panel').classList.remove('open'); } });
+// A drawer parked off-screen must not keep a resize's worth of stale state.
+window.addEventListener('resize', () => { if (!navIsDrawer()) setNavOpen(false); });
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
-$('#account-settings').onclick = async () => { $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadDeletionPlan()]); };
+$('#account-settings').onclick = async () => { closeNavOnDrawer(); $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadDeletionPlan()]); };
 $('#close-account').onclick = () => { $('#password-form').reset(); $('#delete-account-form').reset(); $('#account-dialog').close(); };
 $('#password-form').onsubmit = async event => {
   event.preventDefault();
@@ -458,18 +479,18 @@ $('#delete-account-form').onsubmit = async event => {
 };
 $('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
 $('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
-$('#invite-friend').onclick = async () => { if(!state.community)return; $('#invite-dialog').showModal(); await loadInvites(); };
+$('#invite-friend').onclick = async () => { if(!state.community)return; closeNavOnDrawer(); $('#invite-dialog').showModal(); await loadInvites(); };
 $('#close-invites').onclick = () => $('#invite-dialog').close();
 $('#create-invite').onclick = async () => { if(!state.community)return; const button=$('#create-invite'); button.disabled=true; try { const data=await api('/api/invites',{method:'POST',body:JSON.stringify({community_id:state.community.id,max_uses:10,lifetime_hours:24})}); if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(data.token); alert('Invite code copied. It expires in 24 hours.');}else{prompt('Copy this invite code. It expires in 24 hours.',data.token);} await loadInvites(); } catch(error){alert(error.message);} finally {button.disabled=false;} };
 async function loadInvites() { const communityId=state.community?.id; if(!communityId)return; $('#invite-list').innerHTML='<p class="member-empty">Loading invites…</p>'; try { const data=await api(`/api/communities/${communityId}/invites`); if(state.community?.id!==communityId)return; $('#invite-list').innerHTML=data.invites.length?data.invites.map(invite=>`<article class="invite-row"><div><strong>Invite #${Number(invite.id)}</strong><span>Created by ${escapeHTML(invite.creator_username)} · ${Number(invite.uses)}/${Number(invite.max_uses)} uses</span><span>Expires ${new Date(Number(invite.expires_at)*1000).toLocaleString()}</span></div><button type="button" data-revoke-invite="${Number(invite.id)}">Revoke</button></article>`).join(''):'<p class="member-empty">No active invites.</p>'; document.querySelectorAll('[data-revoke-invite]').forEach(button=>button.onclick=()=>revokeInvite(Number(button.dataset.revokeInvite))); } catch(error){ $('#invite-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
 async function revokeInvite(inviteId) { if(!confirm(`Revoke invite #${inviteId}? Every copy will stop working immediately.`))return; try { await api(`/api/invites/${inviteId}`,{method:'DELETE'}); await loadInvites(); } catch(error){alert(error.message);} }
-$('#manage-bans').onclick = async () => { if(!state.community)return; $('#ban-dialog').showModal(); await loadBans(); };
+$('#manage-bans').onclick = async () => { if(!state.community)return; closeNavOnDrawer(); $('#ban-dialog').showModal(); await loadBans(); };
 $('#close-bans').onclick = () => $('#ban-dialog').close();
 async function loadBans() { const communityId=state.community?.id; if(!communityId)return; $('#ban-list').innerHTML='<p class="member-empty">Loading bans…</p>'; try { const data=await api(`/api/communities/${communityId}/bans`); if(state.community?.id!==communityId)return; $('#ban-list').innerHTML=data.bans.length?data.bans.map(ban=>`<article class="invite-row"><div><strong>${escapeHTML(ban.username)}</strong><span>Banned by ${escapeHTML(ban.banned_by_username||'a former moderator')} · ${new Date(ban.created_at).toLocaleString()}</span></div>${canModerateRole(ban.role_at_ban)?`<button type="button" data-unban-member="${Number(ban.user_id)}">Unban</button>`:''}</article>`).join(''):'<p class="member-empty">No banned accounts.</p>'; document.querySelectorAll('[data-unban-member]').forEach(button=>button.onclick=()=>unbanMember(Number(button.dataset.unbanMember))); } catch(error){ $('#ban-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
 async function unbanMember(userId) { if(!confirm('Allow this account to join again?'))return; try { await api(`/api/communities/${state.community.id}/bans/${userId}`,{method:'DELETE'}); await loadBans(); } catch(error){alert(error.message);} }
 $('#add-channel').onclick = async () => { if(!state.community)return; const name=prompt('Channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); selectChannel(channel); } catch(error){alert(error.message);} };
 
-$('#notify-settings').onclick = () => { $('#notify-dialog').showModal(); renderNotificationSettings(); };
+$('#notify-settings').onclick = () => { closeNavOnDrawer(); $('#notify-dialog').showModal(); renderNotificationSettings(); };
 $('#close-notify').onclick = () => $('#notify-dialog').close();
 $('#notify-default').onchange = event => setDefaultNotifications(event.target.value);
 $('#enable-notifications').onclick = async () => { await requestNotificationPermission(); renderNotificationSettings(); };

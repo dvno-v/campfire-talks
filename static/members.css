@@ -208,13 +208,5 @@
   }
 }
 
-@media (max-width: 700px) {
-  .app,
-  .app.members-hidden {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .chat-header > span {
-    display: none;
-  }
-}
+/* The single-column collapse and the phone rules live in shell.css, which owns
+   the responsive shell for every panel. */

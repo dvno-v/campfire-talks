@@ -32,6 +32,26 @@ docs/                     security, privacy, API, operations, and roadmap
 - The HTTP layer remains responsible for authenticating requests and applying
   resource-level authorization before calling persistence operations.
 - The browser client never receives or stores the session token directly.
+- Each stylesheet in `static/` owns one panel; `shell.css` owns the responsive
+  shell and is linked last, so it is the only file permitted to override the
+  others' layout. Panel stylesheets do not carry their own breakpoints.
+
+## Responsive shell
+
+The desktop layout is four columns: community rail, channel list, conversation,
+member list. They fold in the order they can be spared.
+
+| Width | Rail | Channels | Members |
+| --- | --- | --- | --- |
+| Above 1100px | column | column | column |
+| 761–1100px | column | column | slide-over |
+| 760px and below | drawer | drawer | slide-over |
+
+The rail and the channel list slide over together as one drawer, because a
+phone that could switch channels but not communities — or that could do neither
+— would put invites, bans, notification settings, account security, and
+sign-out permanently out of reach. Nothing in the shell is hidden with
+`display: none` at a breakpoint; every control has a way in at every width.
 
 ## Current request path
 

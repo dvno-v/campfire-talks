@@ -11,6 +11,8 @@
   <link rel="stylesheet" href="/invites.css">
   <link rel="stylesheet" href="/account.css">
   <link rel="stylesheet" href="/notifications.css">
+  <!-- Last: owns the responsive shell and may override any panel above it. -->
+  <link rel="stylesheet" href="/shell.css">
 </head>
 <body>
   <main id="auth" class="auth-shell">
@@ -30,14 +32,15 @@
   </main>
 
   <main id="app" class="app hidden">
-    <aside class="rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
-    <aside class="sidebar">
+    <div id="nav-scrim" class="nav-scrim" aria-hidden="true"></div>
+    <aside class="rail" id="community-rail"><div class="brand-mark small">C</div><div id="community-icons"></div><button id="add-community" class="round" title="Create community">+</button><button id="join-community" class="round join" title="Join with invite">↪</button></aside>
+    <aside class="sidebar" id="channel-drawer">
       <header><strong id="community-name">Campfire</strong><div class="header-actions"><button id="notify-settings" class="notify-button" title="Notification settings">🔔</button><button id="manage-bans" class="hidden" title="Manage bans">⊘</button><button id="invite-friend" class="hidden" title="Manage invites">⌁</button><button id="add-channel" class="hidden" title="Add channel">+</button></div></header>
       <div class="channel-heading">TEXT CHANNELS</div><nav id="channels"></nav>
       <footer><div id="avatar"></div><span id="current-user"></span><button id="account-settings" title="Account security" aria-label="Account security">⚙</button><button id="logout" title="Sign out" aria-label="Sign out">↗</button></footer>
     </aside>
     <section class="chat">
-      <header class="chat-header"><b>#</b><strong id="channel-name">general</strong><span>A place to talk</span><button id="toggle-members" class="members-toggle" type="button" aria-expanded="true">People <output id="member-count">0</output></button></header>
+      <header class="chat-header"><button id="toggle-nav" class="nav-toggle" type="button" aria-label="Show communities and channels" aria-expanded="false" aria-controls="channel-drawer"><svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M2 5h16M2 10h16M2 15h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg></button><b>#</b><strong id="channel-name">general</strong><span class="chat-topic">A place to talk</span><button id="toggle-members" class="members-toggle" type="button" aria-expanded="true">People <output id="member-count">0</output></button></header>
       <div id="messages" class="messages"><div class="empty"><div>#</div><h2>Welcome</h2><p>This is the beginning of the channel.</p></div></div>
       <form id="message-form" class="composer"><button id="upload-button" type="button" title="Share an image">+</button><input id="file-input" class="hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp"><textarea id="message" rows="1" maxlength="4000" placeholder="Message #general"></textarea><span>↵</span></form>
     </section>
