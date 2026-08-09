@@ -42,7 +42,7 @@ Status: in progress
 - [x] Channel permissions, slow mode, and upload controls *(contribution
       rules; per-channel read restrictions are deferred to a later milestone)*
 - [x] Account password change, active-session list, and remote session revocation
-- [ ] Per-community message and attachment retention settings
+- [x] Per-community message and attachment retention settings
 - [x] User account deletion and self-service data export *(export is
       self-service rather than operator-assisted; no operator step is needed)*
 - [x] Attachment deletion when its message is removed *(delivered with message

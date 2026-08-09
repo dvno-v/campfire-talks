@@ -71,6 +71,13 @@ as long as it lasts, which is the current ceiling on concurrent users.
 limit Campfire answers `503` instead of accepting work it cannot carry. Raising
 them raises real memory and thread use, so measure before doing so.
 
+`CAMPFIRE_RETENTION_SWEEP_SECONDS` (default 3600, minimum 60) sets how often
+the retention sweep runs. Retention windows themselves are set per community in
+the interface, are measured in days, and default to keeping everything, so the
+sweep does nothing until a community chooses. Setting a window also sweeps
+immediately, so the timer only governs how promptly newly aged history is
+removed.
+
 `CAMPFIRE_MAX_UPLOAD_BYTES` controls the per-image limit and defaults to
 8,388,608 bytes. Back up and restore the database and upload directory as one
 consistent unit: the database contains authorization and filenames, while the

@@ -841,6 +841,43 @@ class HTTPTests(unittest.TestCase):
                          {"post_min_role": "member", "slow_mode_seconds": 0,
                           "uploads_allowed": True}, cookie=self.owner_session)
 
+    def test_retention_is_administrator_only_and_applies_immediately(self):
+        member = self.signed_in_user("http_retention_member")
+        status, _, _ = self.request("PATCH", f"/api/communities/{self.community_id}/retention",
+                                    {"message_days": 30, "attachment_days": 30}, cookie=member)
+        self.assertEqual(status, 403)
+        status, payload, _ = self.request("PATCH", f"/api/communities/{self.community_id}/retention",
+                                          {"message_days": 99999, "attachment_days": 0},
+                                          cookie=self.owner_session)
+        self.assertEqual(status, 400)
+
+        stale = self.post_message(self.owner_session, "long ago")
+        with database.connect() as db:
+            db.execute("UPDATE messages SET created_at='2020-01-01T00:00:00Z' WHERE id=?",
+                       (stale["id"],))
+        fresh = self.post_message(self.owner_session, "written just now")
+
+        with self.event_stream(self.owner_session) as stream:
+            time.sleep(0.3)
+            status, stored, _ = self.request(
+                "PATCH", f"/api/communities/{self.community_id}/retention",
+                {"message_days": 30, "attachment_days": 0}, cookie=self.owner_session)
+            self.assertEqual(status, 200)
+            self.assertEqual(stored["message_days"], 30)
+            purge = self.await_event(stream, lambda event: event["type"] == "channel.purged")
+        try:
+            self.assertIsNotNone(purge, "members need telling that history moved underneath them")
+            self.assertEqual(purge["channel_id"], self.channel_id)
+            with database.connect() as db:
+                self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE id=?",
+                                             (stale["id"],)).fetchone(),
+                                  "setting a window must apply now, not at the next sweep")
+                self.assertIsNotNone(db.execute("SELECT 1 FROM messages WHERE id=?",
+                                                (fresh["id"],)).fetchone())
+        finally:
+            self.request("PATCH", f"/api/communities/{self.community_id}/retention",
+                         {"message_days": 0, "attachment_days": 0}, cookie=self.owner_session)
+
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)

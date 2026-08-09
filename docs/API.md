@@ -165,6 +165,24 @@ Accepts an empty JSON object. It applies the same hierarchy as kicking, removes
 the membership, and stores a persistent account ban. A banned account receives
 `403` from invite joining before the invite's use count changes.
 
+### `PATCH /api/communities/{community_id}/retention`
+
+```json
+{"message_days": 90, "attachment_days": 30}
+```
+
+Community administrators and owners only. Each window is 0–3650 whole days, and
+`0` means keep indefinitely, which is the default. Images may be given a shorter
+window than messages; removing a shared image removes the message carrying it,
+because an upload is stored as a message with an empty body.
+
+Setting a window sweeps immediately rather than waiting for the next scheduled
+pass, so shortening one takes effect when it is set. Every affected channel
+receives a `channel.purged` event carrying a count rather than message ids: a
+client re-reads the channel instead of being walked through what may be
+thousands of deletions. Current windows travel on `GET /api/bootstrap` as each
+community's `retention` object.
+
 ### `PATCH /api/channels/{channel_id}`
 
 ```json

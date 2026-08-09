@@ -108,7 +108,7 @@
 
   /* Four controls share the sidebar header with the community name, so these
      grow to a comfortable height without taking the width to match. */
-  .sidebar header button {
+  .sidebar header .header-actions button {
     align-items: center;
     display: inline-flex;
     justify-content: center;
@@ -403,4 +403,25 @@
 
 #channel-settings:hover {
   color: var(--ink);
+}
+
+.sidebar header .community-name {
+  background: none;
+  color: var(--ink);
+  font-size: inherit;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar header .community-name:disabled {
+  cursor: default;
+}
+
+.sidebar header .community-name:not(:disabled):hover {
+  color: var(--accent2);
 }

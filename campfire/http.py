@@ -14,6 +14,7 @@ import secrets
 import select
 import socket
 import sqlite3
+import threading
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,8 +22,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .config import ACCESS_LOGS, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
-from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, TRUSTED_PROXIES
-from .config import SECURE_COOKIES, STATIC_DIR, UPLOAD_DIR
+from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, RETENTION_SWEEP_SECONDS
+from .config import SECURE_COOKIES, STATIC_DIR, TRUSTED_PROXIES, UPLOAD_DIR
 from .database import connect, initialize_database, message_from_row, utc_now
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
@@ -43,6 +44,8 @@ from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
 from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
+from .services.retention import MAX_RETENTION_DAYS, purge_expired
+from .services.retention import set_retention as set_community_retention
 from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
@@ -261,6 +264,8 @@ class App(BaseHTTPRequestHandler):
                 return self.update_channel(path)
             if path.startswith("/api/messages/"):
                 return self.edit_message(path)
+            if path.startswith("/api/communities/") and path.endswith("/retention"):
+                return self.update_retention(path)
             if path.startswith("/api/communities/") and "/members/" in path:
                 return self.update_member_role(path)
             if path.startswith("/api/channels/") and path.endswith("/notifications"):
@@ -474,7 +479,9 @@ class App(BaseHTTPRequestHandler):
             return
         with connect() as db:
             rows = db.execute("""
-              SELECT c.id community_id,c.name community_name,ch.id channel_id,ch.name channel_name,
+              SELECT c.id community_id,c.name community_name,
+                c.message_retention_days,c.attachment_retention_days,
+                ch.id channel_id,ch.name channel_name,
                 ch.post_min_role,ch.slow_mode_seconds,ch.uploads_allowed,
                 CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END community_role
               FROM communities c JOIN memberships m ON m.community_id=c.id
@@ -487,7 +494,10 @@ class App(BaseHTTPRequestHandler):
         for row in rows:
             community = communities.setdefault(row["community_id"], {
                 "id": row["community_id"], "name": row["community_name"],
-                "role": row["community_role"], "channels": []})
+                "role": row["community_role"],
+                "retention": {"message_days": row["message_retention_days"],
+                              "attachment_days": row["attachment_retention_days"]},
+                "channels": []})
             community["channels"].append({"id": row["channel_id"], "name": row["channel_name"]}
                                          | settings_payload(row)
                                          | self.channel_state_payload(states.get(row["channel_id"])))
@@ -714,6 +724,35 @@ class App(BaseHTTPRequestHandler):
         if status != "ok":
             return self.error(HTTPStatus.FORBIDDEN, "You can only unban members below your role")
         self.send_json({"ok": True})
+
+    def update_retention(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            community_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            self.close_connection = True
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid community")
+        body = self.json_body()
+        try:
+            message_days = int(body.get("message_days", 0))
+            attachment_days = int(body.get("attachment_days", 0))
+        except (TypeError, ValueError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid retention")
+        with connect() as db:
+            stored = set_community_retention(db, community_id, user["id"],
+                                             message_days, attachment_days)
+        if stored is None:
+            return self.error(HTTPStatus.FORBIDDEN,
+                              "Only community administrators can change retention")
+        if stored is False:
+            return self.error(HTTPStatus.BAD_REQUEST,
+                              f"Retention must be 0–{MAX_RETENTION_DAYS} days")
+        # Applied immediately rather than at the next sweep: shortening a window
+        # should take effect when it is set, not up to an hour later.
+        run_retention_sweep()
+        self.send_json(stored)
 
     def update_member_role(self, path):
         user = self.require_user()
@@ -1210,8 +1249,39 @@ class App(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+def run_retention_sweep():
+    """One pass of the retention rules over every community that set them."""
+    with connect() as db:
+        removed, orphaned = purge_expired(db)
+    for orphaned_file in orphaned:
+        (UPLOAD_DIR / orphaned_file).unlink(missing_ok=True)
+    for (community_id, channel_id), count in removed.items():
+        # A count, not the ids: a client re-reads the channel rather than being
+        # walked through what may be thousands of individual deletions.
+        BROKER.publish({"type": "channel.purged", "community_id": community_id,
+                        "channel_id": channel_id, "removed": count})
+    return removed
+
+
+def start_retention_sweeper():
+    """Sweep on a timer, off the request path.
+
+    A failed sweep must not end the thread; retention that silently stopped
+    running would be worse than retention that logged a bad hour.
+    """
+    def sweep_forever():
+        while True:
+            try:
+                run_retention_sweep()
+            except Exception as failure:  # noqa: BLE001 - the loop must outlive one bad pass
+                print(f"retention sweep failed: {failure}")
+            time.sleep(RETENTION_SWEEP_SECONDS)
+    threading.Thread(target=sweep_forever, daemon=True, name="retention").start()
+
+
 def main():
     initialize_database()
+    start_retention_sweeper()
     print(f"Campfire is running at http://{HOST}:{PORT}")
     ThreadingHTTPServer((HOST, PORT), App).serve_forever()
 

@@ -58,6 +58,7 @@ async function enterApp() {
     if (event.type === 'member.removed') return applyMemberRemoved(event);
     if (event.type === 'channel.created') return applyChannelCreated(event);
     if (event.type === 'channel.updated') return rememberChannelRules(event);
+    if (event.type === 'channel.purged') return applyChannelPurged(event);
     if (event.type === 'message.created') countUnread(event);
     if (event.type === 'message.deleted') discountUnread(event);
     if (event.channel_id !== state.channel?.id) return;
@@ -80,9 +81,19 @@ function selectCommunity(community) {
   if ($('#ban-dialog').open) $('#ban-dialog').close();
   state.community = community; $('#community-name').textContent = community?.name || 'Campfire'; renderCommunities();
   state.members = []; renderMembers();
+  renderCommunityControls();
   renderChannels();
   selectChannel(community?.channels[0]);
   if (community) loadMembers(community.id);
+}
+
+// The community name is the way in to community settings, so it stops being a
+// label and becomes a control only for the people who can change something.
+function renderCommunityControls() {
+  const manages = ['owner', 'administrator'].includes(currentCommunityRole());
+  const button = $('#community-name');
+  button.disabled = !state.community || !manages;
+  button.title = button.disabled ? '' : 'Community settings';
 }
 
 function renderChannels() {
@@ -292,6 +303,7 @@ function renderMembers() {
   $('#invite-friend').classList.toggle('hidden', !manages);
   $('#add-channel').classList.toggle('hidden', !manages);
   $('#manage-bans').classList.toggle('hidden', roleRank(currentCommunityRole()) < roleRank('moderator'));
+  renderCommunityControls();
   if (!state.members.length) { $('#member-list').innerHTML = '<p class="member-empty">Loading members…</p>'; return; }
   const groups = [['ONLINE', state.members.filter(m => state.online.has(m.id))], ['OFFLINE', state.members.filter(m => !state.online.has(m.id))]];
   $('#member-list').innerHTML = groups.filter(([, members]) => members.length)
@@ -377,6 +389,13 @@ async function moderateMember(member, banned) {
 // Re-reads the channel outright: a gap can hide edits and deletions too, not
 // only new messages, so appending what is missing would not be enough.
 function resyncChannel() { if (state.channel) selectChannel(state.channel); }
+
+// Retention removed history underneath us. The event carries a count rather
+// than ids, so the only honest response is to re-read.
+function applyChannelPurged(event) {
+  if (Number(event.channel_id) === state.channel?.id) resyncChannel();
+  refreshUnread();
+}
 
 function applyChannelCreated(event) {
   const community = state.communities.find(c => c.id === event.community_id);
@@ -608,6 +627,32 @@ $('#delete-account-form').onsubmit = async event => {
     event.currentTarget.reset(); showAuth();
   } catch(error){status.classList.add('error');status.textContent=error.message;}
   finally{button.disabled=false;}
+};
+$('#community-name').onclick = () => {
+  const community = state.community; if (!community) return;
+  closeNavOnDrawer();
+  $('#community-dialog-name').textContent = community.name;
+  $('#message-retention').value = String(community.retention?.message_days ?? 0);
+  $('#attachment-retention').value = String(community.retention?.attachment_days ?? 0);
+  $('#retention-status').textContent = ''; $('#retention-status').classList.remove('error');
+  $('#community-dialog').showModal();
+};
+$('#close-community').onclick = () => $('#community-dialog').close();
+$('#retention-form').onsubmit = async event => {
+  event.preventDefault();
+  const community = state.community; if (!community) return;
+  const status = $('#retention-status'); status.classList.remove('error'); status.textContent = '';
+  const messageDays = Number($('#message-retention').value);
+  const attachmentDays = Number($('#attachment-retention').value);
+  if (messageDays && !confirm(`Delete messages older than ${messageDays} days in ${community.name}? This runs immediately and cannot be undone.`)) return;
+  const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
+  try {
+    const stored = await api(`/api/communities/${Number(community.id)}/retention`, { method: 'PATCH',
+      body: JSON.stringify({ message_days: messageDays, attachment_days: attachmentDays }) });
+    community.retention = { message_days: stored.message_days, attachment_days: stored.attachment_days };
+    $('#community-dialog').close();
+  } catch (error) { status.classList.add('error'); status.textContent = error.message; }
+  finally { button.disabled = false; }
 };
 $('#channel-settings').onclick = () => {
   const channel = state.channel; if (!channel) return;

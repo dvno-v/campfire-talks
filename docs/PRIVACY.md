@@ -11,8 +11,9 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Session-token digest, user link, creation time, and expiry | Staying signed in and showing active sessions | 30 days; revoked rows are deleted immediately and expired rows at startup |
 | Communities, memberships, and roles | Authorization | Until manually deleted |
 | Community bans (account, prior role, moderator, time) | Preventing invite re-entry | Until unbanned or the account/community is deleted |
-| Channel messages | Conversation history | Indefinite, until deleted by the author or a community moderator |
-| Shared images and metadata | User-requested image sharing | Indefinite, until deleted by the uploader or a community moderator |
+| Channel messages | Conversation history | Indefinite by default, or the community's message retention window |
+| Shared images and metadata | User-requested image sharing | Indefinite by default, or the community's image retention window |
+| Community retention windows (two day counts) | Scheduled deletion of old history | Until the community is deleted |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
 | Channel posting rules (minimum role, slow-mode seconds, uploads allowed) | Community moderation | Until the channel is deleted |
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
@@ -101,6 +102,17 @@ desktop. The browser is asked for notification permission only when you press
 the button that asks for it, never on load and never as a side effect of
 signing in. Until you do, Campfire says so in the notification settings rather
 than leaving you to wonder why nothing appears.
+
+A community may set how long it keeps messages and how long it keeps shared
+images, in whole days. Both default to keeping everything, so an instance that
+never chooses is never quietly pruned. Images can be given the shorter window:
+they are most of the disk a small instance uses. A sweep deletes the expired
+messages and unlinks the stored image files, so the bytes stop being retrievable
+rather than merely becoming unreferenced; removing a shared image removes the
+message carrying it, because an upload is stored as a message with an empty
+body. The sweep runs hourly and again the moment a window is set, and it records
+nothing about what it removed beyond telling the affected channels to re-read.
+Backups taken before a sweep still hold the content until they are rotated.
 
 A channel's posting rules are stored on the channel, not per account: Campfire
 records that a channel is in slow mode, never who was slowed by it or when. The

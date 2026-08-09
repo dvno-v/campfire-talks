@@ -90,6 +90,11 @@ encrypted. A compromised host, browser, or administrator can read them.
   checks it before consuming an invite. The removed account receives only its
   own removal event; subsequent community events fail the normal membership
   check.
+- Retention windows are set per community by administrators and owners, are
+  bounded to 0–3650 days, and default to keeping everything. The sweep runs on
+  a timer off the request path and survives a failed pass rather than ending
+  the thread, because retention that silently stopped running would be worse
+  than retention that logged a bad hour.
 - Channels carry their own posting rules: a minimum role to contribute, a slow
   mode measured from the author's last message in that channel, and whether
   images are accepted. All three are enforced server-side on both the message

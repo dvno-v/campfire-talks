@@ -20,6 +20,7 @@ from campfire.services.communities import community_role, has_role, is_banned, l
 from campfire.services.communities import list_community_bans, list_community_members, remove_member
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+from campfire.services.retention import purge_expired, set_retention
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
 from campfire.services.notifications import set_account_mode, set_channel_mode
 
@@ -404,6 +405,69 @@ class CampfireTests(unittest.TestCase):
             moderator = channel_context(db, channel_id, actors["moderator"])
             self.assertEqual(may_post(db, moderator, actors["moderator"], now="2026-08-09T12:00:10Z"),
                              ("ok", None), "moderators answer floods, so slow mode spares them")
+
+    def retention_fixture(self, db, label):
+        """One community, one channel, and messages of assorted ages."""
+        actors, community_id, channel_id = self.channel_fixture(db, label)
+        ages = {}
+        for name, stamp, attach in (("ancient", "2020-01-01T00:00:00Z", False),
+                                    ("old_image", "2026-06-01T00:00:00Z", True),
+                                    ("recent", "2026-08-08T00:00:00Z", False)):
+            attachment_id = None
+            if attach:
+                attachment_id = db.execute("""INSERT INTO attachments
+                  (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+                  VALUES(?,?,?,?,?,?,?)""",
+                  (channel_id, actors["member"], f"{label}_{name}.png", "photo.png",
+                   "image/png", 10, stamp)).lastrowid
+            ages[name] = db.execute("""INSERT INTO messages
+              (channel_id,author_id,body,created_at,attachment_id) VALUES(?,?,?,?,?)""",
+              (channel_id, actors["member"], name, stamp, attachment_id)).lastrowid
+        return actors, community_id, channel_id, ages
+
+    def test_retention_removes_only_what_is_past_its_window(self):
+        with database.connect() as db:
+            actors, community_id, channel_id, ages = self.retention_fixture(db, "retention")
+            self.assertIsNone(set_retention(db, community_id, actors["moderator"], 30, 30),
+                              "a moderator does not set retention")
+            self.assertIs(set_retention(db, community_id, actors["owner"], -1, 0), False)
+            self.assertEqual(set_retention(db, community_id, actors["administrator"], 90, 30),
+                             {"community_id": community_id, "message_days": 90,
+                              "attachment_days": 30})
+
+            removed, orphaned = purge_expired(db, now="2026-08-09T00:00:00Z")
+            surviving = {row[0] for row in db.execute(
+                "SELECT id FROM messages WHERE channel_id=?", (channel_id,))}
+        self.assertEqual(removed, {(community_id, channel_id): 2})
+        self.assertEqual(orphaned, ["retention_old_image.png"])
+        self.assertEqual(surviving, {ages["recent"]},
+                         "only history past a window it was given goes")
+
+    def test_retention_defaults_to_keeping_everything(self):
+        """A community that never chose a window is never quietly pruned."""
+        with database.connect() as db:
+            _, community_id, channel_id, ages = self.retention_fixture(db, "no_retention")
+            removed, orphaned = purge_expired(db, now="2126-01-01T00:00:00Z")
+            surviving = {row[0] for row in db.execute(
+                "SELECT id FROM messages WHERE channel_id=?", (channel_id,))}
+        self.assertEqual(removed, {})
+        self.assertEqual(orphaned, [])
+        self.assertEqual(surviving, set(ages.values()))
+
+    def test_image_retention_can_be_shorter_than_message_retention(self):
+        with database.connect() as db:
+            actors, community_id, channel_id, ages = self.retention_fixture(db, "image_retention")
+            set_retention(db, community_id, actors["owner"], 0, 30)
+            removed, orphaned = purge_expired(db, now="2026-08-09T00:00:00Z")
+            surviving = {row[0] for row in db.execute(
+                "SELECT id FROM messages WHERE channel_id=?", (channel_id,))}
+            attachments = db.execute("SELECT COUNT(*) FROM attachments WHERE channel_id=?",
+                                     (channel_id,)).fetchone()[0]
+        self.assertEqual(removed, {(community_id, channel_id): 1})
+        self.assertEqual(orphaned, ["image_retention_old_image.png"])
+        self.assertEqual(surviving, {ages["ancient"], ages["recent"]},
+                         "words outlive the images when only images have a window")
+        self.assertEqual(attachments, 0)
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

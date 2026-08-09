@@ -8,6 +8,7 @@ and the browser receives live messages over Server-Sent Events.
 
 - Account registration, login, password changes, and remotely revocable sessions
 - Per-channel posting roles, slow mode, and image-upload controls
+- Per-community retention windows for messages and shared images
 - Self-service data export and account deletion, with owned communities passed
   on rather than orphaned
 - Invite-only registration after the first account

@@ -28,4 +28,7 @@ PORT = int(os.environ.get("CAMPFIRE_PORT", "8000"))
 # operator has named the proxy that sets them.
 TRUSTED_PROXIES = _networks(os.environ.get("CAMPFIRE_TRUSTED_PROXIES", ""))
 MAX_EVENT_STREAMS = max(1, int(os.environ.get("CAMPFIRE_MAX_EVENT_STREAMS", "200")))
+# Retention is measured in days, so sweeping hourly is prompt enough while
+# keeping the work off the request path entirely.
+RETENTION_SWEEP_SECONDS = max(60, int(os.environ.get("CAMPFIRE_RETENTION_SWEEP_SECONDS", "3600")))
 MAX_EVENT_STREAMS_PER_USER = max(1, int(os.environ.get("CAMPFIRE_MAX_EVENT_STREAMS_PER_USER", "8")))

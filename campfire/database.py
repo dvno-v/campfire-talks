@@ -56,7 +56,13 @@ def initialize_database():
         );
         CREATE TABLE IF NOT EXISTS communities (
           id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_id INTEGER NOT NULL REFERENCES users(id),
-          created_at TEXT NOT NULL
+          created_at TEXT NOT NULL,
+          -- Zero means keep indefinitely, which stays the default: a community
+          -- that has never chosen is never quietly pruned.
+          message_retention_days INTEGER NOT NULL DEFAULT 0
+            CHECK (message_retention_days >= 0),
+          attachment_retention_days INTEGER NOT NULL DEFAULT 0
+            CHECK (attachment_retention_days >= 0)
         );
         CREATE TABLE IF NOT EXISTS memberships (
           community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
@@ -140,6 +146,11 @@ def initialize_database():
             database.execute("UPDATE sessions SET created_at=? WHERE created_at IS NULL", (utc_now(),))
         if "id" not in session_columns:
             rebuild_sessions_with_stable_ids(database)
+        community_columns = {row[1] for row in database.execute("PRAGMA table_info(communities)")}
+        for column in ("message_retention_days", "attachment_retention_days"):
+            if column not in community_columns:
+                database.execute(f"ALTER TABLE communities ADD COLUMN {column} "
+                                 "INTEGER NOT NULL DEFAULT 0 CHECK (" + column + " >= 0)")
         channel_columns = {row[1] for row in database.execute("PRAGMA table_info(channels)")}
         if "post_min_role" not in channel_columns:
             database.execute("ALTER TABLE channels ADD COLUMN post_min_role TEXT NOT NULL "
