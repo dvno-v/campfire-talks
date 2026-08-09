@@ -2,9 +2,9 @@
 
 ## Safest early deployment
 
-For the current MVP, run Campfire on a machine you control and restrict access
-with a private network such as a home LAN or trusted VPN. Do not forward port
-8000 directly from a router.
+Until reproducible deployment lands, run Campfire on a machine you control and
+restrict access with a private network such as a home LAN or trusted VPN. Do
+not forward port 8000 directly from a router.
 
 ```bash
 CAMPFIRE_HOST=127.0.0.1 \
