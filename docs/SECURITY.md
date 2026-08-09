@@ -22,6 +22,10 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Active invite metadata and revocation require an administrator-or-higher
   community role. Revocation deletes the stored digest, invalidating previously
   copied codes without retaining them.
+- Removing a member revokes the invites they created for that community. An
+  invite outlives its author's membership, so a banned administrator would
+  otherwise keep admitting people through codes already distributed — the one
+  case where a ban does not end the access it was meant to end.
 - Authentication attempts are limited in memory to eight per client and
   operation scope per five-minute window. Addresses are not persisted. Behind a
   reverse proxy set `CAMPFIRE_TRUSTED_PROXIES`, or every user shares one bucket
@@ -113,10 +117,10 @@ standard library also recommends salted, tunably slow password derivation:
 
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
-- There is no multi-factor authentication, password reset, account deletion,
-  or invisible-mode preference. Message deletion is
-  joined by kick/ban, but channel-specific permissions, slow mode, audit logs,
-  and temporary/time-limited moderation actions are not implemented yet.
+- There is no multi-factor authentication, password reset, or invisible-mode
+  preference. Message deletion is joined by kick/ban and account deletion, but
+  channel-specific permissions, slow mode, audit logs, and temporary
+  moderation actions are not implemented yet.
 - Bans identify an account, not a person, network, device, or browser. Someone
   who obtains another invite can create a differently named account; Campfire
   intentionally does not persist IP addresses or add device fingerprinting to

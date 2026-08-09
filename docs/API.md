@@ -149,9 +149,11 @@ this endpoint. Outsiders receive `404`; non-owner members receive `403`.
 Kicks a current member. Moderators may kick members, administrators may also
 kick moderators, and owners may kick any non-owner. Actors cannot kick
 themselves, peers, or higher roles. A kick removes the membership and that
-account's community-specific read markers and notification overrides. Existing
-messages and attachments remain in community history. The account may rejoin
-with a valid invite.
+account's community-specific read markers and notification overrides. It also
+deletes any invites that account created for this community, so codes it had
+already handed out stop working; invites it created for other communities are
+untouched. Existing messages and attachments remain in community history. The
+account may rejoin with a valid invite.
 
 ### `POST /api/communities/{community_id}/members/{user_id}/ban`
 

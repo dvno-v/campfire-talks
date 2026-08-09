@@ -132,6 +132,13 @@ def remove_member(database, community_id, member_id, actor_id, ban=False, create
     database.execute("""DELETE FROM channel_notifications WHERE user_id=? AND channel_id IN
                          (SELECT id FROM channels WHERE community_id=?)""",
                      (member_id, community_id))
+    # Removing someone has to close the door they were holding open. An invite
+    # outlives the account that made it, so a banned administrator would
+    # otherwise still be able to admit whoever they had handed a code to —
+    # which is exactly what the ban was for. Only their invites to this
+    # community go; a community they still belong to is not this one's business.
+    database.execute("DELETE FROM invitations WHERE community_id=? AND created_by=?",
+                     (community_id, member_id))
     database.execute("DELETE FROM memberships WHERE community_id=? AND user_id=?",
                      (community_id, member_id))
     return "ok", member

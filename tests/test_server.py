@@ -281,6 +281,41 @@ class CampfireTests(unittest.TestCase):
         self.assertEqual(ban["user_id"], actors["member"], "the ban must outlive the moderator's account")
         self.assertIsNone(ban["banned_by"])
 
+    def test_removing_a_member_revokes_the_invites_they_created(self):
+        """A ban that leaves working invite codes behind has not closed the door."""
+        with database.connect() as db:
+            owner_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("revoke_owner", "unused", database.utc_now())).lastrowid
+            admin_id = db.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                                  ("revoke_admin", "unused", database.utc_now())).lastrowid
+            communities = {}
+            for name in ("here", "elsewhere"):
+                communities[name] = db.execute(
+                    "INSERT INTO communities(name,owner_id,created_at) VALUES(?,?,?)",
+                    (f"revoke {name}", owner_id, database.utc_now())).lastrowid
+                for user_id, role in ((owner_id, "member"), (admin_id, "administrator")):
+                    db.execute("INSERT INTO memberships(community_id,user_id,role) VALUES(?,?,?)",
+                               (communities[name], user_id, role))
+            invites = {}
+            for label, community_id, creator in (("theirs", communities["here"], admin_id),
+                                                 ("owners", communities["here"], owner_id),
+                                                 ("far", communities["elsewhere"], admin_id)):
+                invites[label] = db.execute("""INSERT INTO invitations
+                  (community_id,created_by,token_hash,expires_at,max_uses,created_at)
+                  VALUES(?,?,?,?,?,?)""",
+                  (community_id, creator, f"digest_{label}", 2000000000, 5,
+                   database.utc_now())).lastrowid
+
+            status, _ = remove_member(db, communities["here"], admin_id, owner_id, ban=True)
+            self.assertEqual(status, "ok")
+            surviving = {row[0] for row in db.execute("SELECT id FROM invitations")}
+        self.assertNotIn(invites["theirs"], surviving,
+                         "a removed member's codes must stop admitting people")
+        self.assertIn(invites["owners"], surviving,
+                      "only the removed member's own invites are revoked")
+        self.assertIn(invites["far"], surviving,
+                      "a community they still belong to is not this one's business")
+
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")
         self.assertEqual(uploads.detect_image_type(b"GIF89arest")[0], "image/gif")

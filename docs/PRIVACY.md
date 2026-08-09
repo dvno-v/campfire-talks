@@ -61,10 +61,11 @@ role is derived from the community's existing owner link. A role change
 overwrites the previous value and remains in SQLite and its backups until that
 membership is deleted; no role-change history or timestamp is kept.
 
-A kick deletes the membership and that account's read markers and notification
-overrides for the community. It does not delete messages or attachments the
-account previously shared, because those remain part of the other members'
-conversation history. A ban performs the same deletion and stores the banned
+A kick deletes the membership, that account's read markers and notification
+overrides for the community, and the digests of any invites it created for that
+community — codes it had already handed out stop working. It does not delete
+messages or attachments the account previously shared, because those remain
+part of the other members' conversation history. A ban performs the same deletion and stores the banned
 account, its role at that moment, the moderator account, and a timestamp. No
 reason, note, IP address, device identifier, or ban expiry is stored. Unbanning
 deletes the ban row immediately; older backups retain it until rotated.
