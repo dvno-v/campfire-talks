@@ -72,6 +72,10 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Responses apply a same-origin Content Security Policy, deny framing and MIME
   sniffing, disable indexing, and restrict camera, microphone, and display
   capture to the application origin.
+- Frontend files are loaded from an explicit reviewed manifest with fixed
+  content types. Request paths only select an in-memory response; they are never
+  joined to filesystem paths or used to construct HTTP headers. Traversal and
+  control-character paths are rejected before SPA fallback.
 - Every channel read, write, and live event verifies community membership.
 - Presence is disclosed only across an existing shared community, is derived
   from open streams rather than stored, and records no last-seen time.

@@ -6,7 +6,6 @@ from __future__ import annotations
 import hmac
 import http.cookies
 import json
-import mimetypes
 import os
 import queue
 import re
@@ -20,7 +19,7 @@ from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import ACCESS_LOGS, DB_PATH, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
 from .config import MAX_STORAGE_BYTES
@@ -59,6 +58,40 @@ from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
 DISCONNECT_POLL_SECONDS = 2
+
+# Static responses are loaded only from this explicit trusted manifest. Request
+# paths select an in-memory response; they are never joined to a filesystem path
+# or used to derive a response header.
+_STATIC_MANIFEST = (
+    ("/account.css", "account.css"),
+    ("/app.js", "app.js"),
+    ("/attachments.css", "attachments.css"),
+    ("/index.html", "index.html"),
+    ("/invites.css", "invites.css"),
+    ("/layout.css", "layout.css"),
+    ("/members.css", "members.css"),
+    ("/menu.css", "menu.css"),
+    ("/messages.css", "messages.css"),
+    ("/notifications.css", "notifications.css"),
+    ("/shell.css", "shell.css"),
+    ("/styles.css", "styles.css"),
+)
+
+
+def _load_static_responses():
+    """Load the reviewed frontend manifest without involving request data."""
+    return {
+        request_path: (STATIC_DIR / filename).read_bytes()
+        for request_path, filename in _STATIC_MANIFEST
+    }
+
+
+_STATIC_RESPONSES = _load_static_responses()
+_INDEX_RESPONSE = _STATIC_RESPONSES["/index.html"]
+_STYLESHEET_PATHS = frozenset(
+    request_path for request_path, filename in _STATIC_MANIFEST
+    if filename.endswith(".css")
+)
 
 
 class InvalidBody(Exception):
@@ -1302,16 +1335,21 @@ class App(BaseHTTPRequestHandler):
         return bool(self.member_channel(db, event["channel_id"], user["id"]))
 
     def static_file(self, path):
-        relative = "index.html" if path == "/" else path.lstrip("/")
-        candidate = (STATIC_DIR / relative).resolve()
-        if STATIC_DIR.resolve() not in candidate.parents and candidate != STATIC_DIR.resolve():
+        decoded_path = unquote(path)
+        if ("\\" in decoded_path
+                or any(ord(character) < 32 or ord(character) == 127
+                       for character in decoded_path)
+                or any(segment in {".", ".."} for segment in decoded_path.split("/"))):
             return self.error(HTTPStatus.NOT_FOUND, "Not found")
-        if not candidate.is_file():
-            candidate = STATIC_DIR / "index.html"
-        content = candidate.read_bytes()
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
-            content_type += "; charset=utf-8"
+        if path == "/app.js":
+            content = _STATIC_RESPONSES["/app.js"]
+            content_type = "application/javascript; charset=utf-8"
+        elif path in _STYLESHEET_PATHS:
+            content = _STATIC_RESPONSES[path]
+            content_type = "text/css; charset=utf-8"
+        else:
+            content = _INDEX_RESPONSE
+            content_type = "text/html; charset=utf-8"
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))

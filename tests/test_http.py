@@ -78,6 +78,17 @@ class HTTPTests(unittest.TestCase):
         connection.close()
         return response.status, payload, session
 
+    def raw_get(self, path):
+        """Return an unparsed response for static-file and header assertions."""
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        status = response.status
+        headers = response.getheaders()
+        payload = response.read()
+        connection.close()
+        return status, headers, payload
+
     def invite_token(self):
         token = secrets.token_urlsafe(16)
         with database.connect() as db:
@@ -171,6 +182,36 @@ class HTTPTests(unittest.TestCase):
                                 ("digest_registrant",)).fetchone()[0]
         self.assertNotEqual(stored, session)
         self.assertEqual(stored, hashlib.sha256(session.encode()).hexdigest())
+
+    def test_static_assets_have_fixed_content_types_and_spa_fallback(self):
+        status, headers, javascript = self.raw_get("/app.js")
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["Content-Type"],
+                         "application/javascript; charset=utf-8")
+        self.assertIn(b"Campfire", javascript)
+
+        status, headers, frontend = self.raw_get("/channels/a-client-side-route")
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["Content-Type"], "text/html; charset=utf-8")
+        self.assertIn(b"<!doctype html>", frontend.lower())
+
+    def test_static_manifest_covers_every_packaged_frontend_file(self):
+        manifested = {filename for _, filename in campfire_http._STATIC_MANIFEST}
+        packaged = {path.name for path in config.STATIC_DIR.iterdir() if path.is_file()}
+        self.assertEqual(manifested, packaged)
+
+    def test_static_requests_cannot_traverse_paths_or_inject_headers(self):
+        hostile_paths = (
+            "/../campfire/http.py",
+            "/%2e%2e/campfire/http.py",
+            "/route%0d%0aX-Campfire-Injected:%20yes",
+        )
+        for path in hostile_paths:
+            with self.subTest(path=path):
+                status, headers, payload = self.raw_get(path)
+                self.assertEqual(status, 404)
+                self.assertNotIn("X-Campfire-Injected", dict(headers))
+                self.assertEqual(json.loads(payload), {"error": "Not found"})
 
     def test_stored_session_digest_is_not_a_credential(self):
         """Anyone reading the database must not be able to replay what it holds."""
