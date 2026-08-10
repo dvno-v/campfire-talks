@@ -10,6 +10,9 @@ The bytes actually on disk are reported alongside it. They should match, and
 saying both is how an operator finds out when they do not.
 """
 
+import os
+import shutil
+
 
 def tracked_bytes(database):
     """Total size and count of the images Campfire knows it is storing."""
@@ -72,3 +75,90 @@ def directory_bytes(upload_dir):
         return sum(path.stat().st_size for path in upload_dir.iterdir() if path.is_file())
     except OSError:
         return None
+
+
+def capacity_warnings(database, limit_bytes, upload_dir, database_path,
+                      warning_percent=90):
+    """Return operator-facing warnings before configured or physical space runs out.
+
+    Only warning codes and percentages are returned. Filesystem sizes can
+    describe unrelated data on a shared host, so Campfire does not disclose
+    them through an HTTP endpoint.
+    """
+    warnings = []
+    used = tracked_bytes(database)[0]
+    if limit_bytes and used * 100 >= limit_bytes * warning_percent:
+        percent = min(100, (used * 100) // limit_bytes)
+        warnings.append({
+            "code": "image_storage_limit",
+            "percent": percent,
+            "message": f"Campfire's image storage limit is {percent}% used.",
+        })
+
+    checked_devices = set()
+    filesystem_warned = False
+    for path in (database_path, upload_dir):
+        existing = path
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        try:
+            device = existing.stat().st_dev
+            if device in checked_devices:
+                continue
+            checked_devices.add(device)
+            disk = shutil.disk_usage(existing)
+        except OSError:
+            continue
+        if (not filesystem_warned and disk.total
+                and disk.used * 100 >= disk.total * warning_percent):
+            percent = min(100, (disk.used * 100) // disk.total)
+            warnings.append({
+                "code": "filesystem_capacity",
+                "percent": percent,
+                "message": f"A filesystem used by Campfire is {percent}% full.",
+            })
+            filesystem_warned = True
+    return warnings
+
+
+def filesystems_have_space(*paths):
+    """Whether every distinct filesystem behind these paths has usable space."""
+    checked_devices = set()
+    for path in paths:
+        existing = path
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        try:
+            device = existing.stat().st_dev
+            if device in checked_devices:
+                continue
+            checked_devices.add(device)
+            if shutil.disk_usage(existing).free <= 0:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def writable_location(path, directory=False):
+    """Whether an existing path, or the closest parent of a new one, is writable."""
+    if path.exists():
+        if directory and not path.is_dir():
+            return False
+        if not directory and not path.is_file():
+            return False
+        candidate = path
+    else:
+        candidate = path.parent
+        while not candidate.exists() and candidate != candidate.parent:
+            candidate = candidate.parent
+        if not candidate.is_dir():
+            return False
+    try:
+        mode = candidate.stat().st_mode
+    except OSError:
+        return False
+    # Checking permission bits keeps this useful when the process is tested as
+    # root, where access(2) can otherwise mask a bad read-only configuration.
+    required = os.W_OK | (os.X_OK if candidate.is_dir() else 0)
+    return bool(mode & 0o222) and os.access(candidate, required)

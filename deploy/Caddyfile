@@ -1,0 +1,21 @@
+{
+	admin off
+	log {
+		output discard
+	}
+}
+
+{$CAMPFIRE_DOMAIN} {
+	log {
+		output discard
+	}
+
+	request_body {
+		max_size 9MB
+	}
+
+	reverse_proxy campfire:8000 {
+		flush_interval -1
+		header_up X-Forwarded-For {remote_host}
+	}
+}

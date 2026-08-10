@@ -5,15 +5,18 @@ process” does not mean “single file”: security-sensitive responsibilities 
 separate modules and explicit dependency directions.
 
 ```text
-server.py                 development/process entry point
+server.py                 compatibility process entry point
     │
-    └── campfire/http.py  HTTP routing, authorization calls, response policy
-          ├── config.py   environment parsing and filesystem locations
-          ├── database.py SQLite schema, migration, connections, serializers
-          ├── security.py password/session/invite primitives and rate limits
-          ├── uploads.py  hostile image-name and file-signature validation
-          ├── realtime.py in-process live-event fan-out and derived presence
-          └── services/   actor-authorized domain queries and workflows
+    └── campfire/__main__.py  serve/migrate/backup/restore operator commands
+          ├── operations.py  consistent snapshot verification and restore
+          ├── migrations/   immutable ordered schema versions
+          ├── config.py      parsing, validation, and filesystem locations
+          ├── database.py    connections, migration runner, serializers
+          └── http.py        routing, authorization calls, response policy
+                ├── security.py  password/session/invite primitives and limits
+                ├── uploads.py   hostile image-name and signature validation
+                ├── realtime.py  in-process event fan-out and presence
+                └── services/    authorized domain queries and workflows
 
 static/                   dependency-free browser client
 tests/                    owning-module unit tests
@@ -26,7 +29,10 @@ docs/                     security, privacy, API, operations, and roadmap
   effects beyond importing the application.
 - Configuration is read in one module. Other modules do not independently
   reinterpret environment variables.
-- Database initialization and row serialization live in `database.py`.
+- Database connections, migration transactions, and row serialization live in
+  `database.py`; immutable version steps live under `migrations/`.
+- `operations.py` owns backup manifests, hashes, SQLite snapshots, and offline
+  restore. HTTP handlers do not reinterpret those filesystem workflows.
 - Password and token algorithms live in `security.py`, not request handlers.
 - Raw upload validation is isolated because it handles hostile bytes and names.
 - The HTTP layer remains responsible for authenticating requests and applying
@@ -69,6 +75,12 @@ browser request
   → JSON/SSE/image response
 ```
 
+`/healthz` stops at the HTTP layer. `/readyz` additionally performs a bounded
+schema read and filesystem-permission checks, returning only named states and
+capacity-warning codes. These probes are separate because a dependency failure
+should remove an instance from traffic without telling a supervisor to restart
+a live process indefinitely.
+
 ## Why this is not microservices
 
 For a handful of friends, splitting chat, identity, storage, and presence into
@@ -78,7 +90,7 @@ later extraction only where operations require it. Voice/screen media is the
 exception because WebRTC routing is a specialized workload and will run in a
 separate self-hosted SFU.
 
-## Next structural step
+## Domain services
 
 `campfire/http.py` intentionally remains the composition point. Community
 membership and roles, message ownership, per-account reading state, and account
@@ -95,7 +107,7 @@ The HTTP layer keeps the decision about which status code reveals what. Those
 service functions accept an explicit database connection and actor identity,
 making authorization testable without opening a socket.
 
-Before supporting multiple Campfire processes, the in-memory event broker and
+Before supporting multiple Campfire processes, the operation lock, in-memory event broker and
 rate limiter must be replaced with shared infrastructure. That complexity is
 not justified for the current single-host target.
 
@@ -111,5 +123,5 @@ A live stream holds a thread and a database connection until it closes, so
 concurrent users are bounded by threads rather than by anything Campfire
 chooses. The limits in `config.py` make that boundary explicit and refuse work
 past it instead of degrading, but they do not raise it. Lifting the ceiling
-means an event loop and a WebSocket gateway, which is Milestone 3 work and a
-rewrite of this module, not a tuning exercise.
+means an event loop and a WebSocket gateway: a future scale project and a
+rewrite of this module, not a tuning exercise for the single-host target.

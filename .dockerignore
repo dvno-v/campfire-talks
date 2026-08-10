@@ -1,0 +1,14 @@
+.git
+.github
+.agents
+.codex
+__pycache__
+*.py[cod]
+.venv
+data
+backups
+.env
+.DS_Store
+tests
+docs
+

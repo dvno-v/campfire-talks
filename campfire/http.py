@@ -16,16 +16,21 @@ import socket
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .config import ACCESS_LOGS, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
+from .config import ACCESS_LOGS, DB_PATH, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
 from .config import MAX_STORAGE_BYTES
 from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, RETENTION_SWEEP_SECONDS
-from .config import SECURE_COOKIES, STATIC_DIR, TRUSTED_PROXIES, UPLOAD_DIR
-from .database import connect, initialize_database, message_from_row, utc_now
+from .config import SECURE_COOKIES, STATIC_DIR, STORAGE_WARNING_PERCENT
+from .config import TRUSTED_PROXIES, UPLOAD_DIR
+from .config import validate_configuration
+from .database import connect, initialize_database, message_from_row, schema_version, utc_now
+from .instance_lock import operation_lock, server_lock
+from .migrations import LATEST_SCHEMA_VERSION
 from .realtime import BROKER
 from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
@@ -47,7 +52,9 @@ from .services.notifications import NOTIFICATION_MODES, account_mode, channel_st
 from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
 from .services.retention import MAX_RETENTION_DAYS, purge_expired
 from .services.retention import set_retention as set_community_retention
-from .services.storage import directory_bytes, exceeds_limit, usage as storage_usage
+from .services.storage import capacity_warnings, directory_bytes, exceeds_limit
+from .services.storage import filesystems_have_space
+from .services.storage import usage as storage_usage, writable_location
 from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
@@ -170,6 +177,10 @@ class App(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/healthz":
+            return self.send_json({"status": "ok"})
+        if path == "/readyz":
+            return self.readiness()
         if path == "/api/me":
             user = self.current_user()
             return self.send_json({"user": user})
@@ -428,13 +439,47 @@ class App(BaseHTTPRequestHandler):
         user = self.require_user()
         if not user:
             return
-        with connect() as db:
+        with closing(connect()) as db:
             report = storage_usage(db, user["id"], MAX_STORAGE_BYTES,
                                    directory_bytes(UPLOAD_DIR))
+            warnings = (capacity_warnings(db, MAX_STORAGE_BYTES, UPLOAD_DIR,
+                                          DB_PATH, STORAGE_WARNING_PERCENT)
+                        if report is not None else [])
         if report is None:
             return self.error(HTTPStatus.FORBIDDEN,
                               "Only community administrators can see storage usage")
+        report["warnings"] = warnings
         self.send_json(report)
+
+    def readiness(self):
+        """Report whether this process can serve Campfire without exposing internals."""
+        checks = {"database": "failed", "storage": "failed"}
+        warning_codes = []
+        try:
+            with closing(connect()) as database:
+                # Naming a required table catches an empty or wrong SQLite file;
+                # SELECT 1 alone would declare either one ready.
+                database.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+                if schema_version(database) == LATEST_SCHEMA_VERSION:
+                    checks["database"] = "ok"
+                    warning_codes = [warning["code"] for warning in capacity_warnings(
+                        database, MAX_STORAGE_BYTES, UPLOAD_DIR, DB_PATH,
+                        STORAGE_WARNING_PERCENT)]
+        except (OSError, sqlite3.Error):
+            pass
+        database_parent_writable = writable_location(DB_PATH.parent, directory=True)
+        if (database_parent_writable and writable_location(DB_PATH)
+                and writable_location(UPLOAD_DIR, directory=True)
+                and filesystems_have_space(DB_PATH, UPLOAD_DIR)):
+            checks["storage"] = "ok"
+        ready = all(value == "ok" for value in checks.values())
+        payload = {
+            "status": "ready" if ready else "not_ready",
+            "checks": checks,
+            "warnings": warning_codes,
+        }
+        self.send_json(payload, HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
+                       None if ready else {"Retry-After": "5"})
 
     def export_account_data(self):
         user = self.require_user()
@@ -1306,10 +1351,12 @@ def start_retention_sweeper():
 
 
 def main():
-    initialize_database()
-    start_retention_sweeper()
-    print(f"Campfire is running at http://{HOST}:{PORT}")
-    ThreadingHTTPServer((HOST, PORT), App).serve_forever()
+    validate_configuration()
+    with server_lock(DB_PATH), operation_lock(DB_PATH, exclusive=False):
+        initialize_database()
+        start_retention_sweeper()
+        print(f"Campfire is running at http://{HOST}:{PORT}")
+        ThreadingHTTPServer((HOST, PORT), App).serve_forever()
 
 
 if __name__ == "__main__":

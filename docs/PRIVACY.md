@@ -18,6 +18,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Channel posting rules (minimum role, slow-mode seconds, uploads allowed) | Community moderation | Until the channel is deleted |
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
+| Migration version, name, and application time | Safe reproducible upgrades | Lifetime of the database |
+| Empty process-lock files | Preventing concurrent servers and live restore | Lifetime of the database path |
 
 Raw passwords, raw session tokens, and raw invite codes are never stored.
 Campfire does not persist IP addresses, user agents, device names, locations,
@@ -107,6 +109,20 @@ Storage reporting counts bytes and files, never who uploaded them. The
 per-community breakdown an administrator sees says how much a community holds,
 not which member contributed it, because the ceiling is about the disk rather
 than about anybody's behaviour.
+
+Health and readiness probes store nothing and require no account. They report
+only whether named dependencies are usable and stable capacity-warning codes;
+they do not expose local paths, exception messages, or filesystem sizes. A
+reverse proxy can still turn probe requests into timestamp metadata if its own
+access logging is enabled, so operators should suppress those logs.
+
+An operator-created backup is a new complete copy of the database and every
+referenced image. Its manifest adds the Campfire/schema versions, creation time,
+random storage filenames, byte sizes, and SHA-256 content hashes so corruption
+or a mismatched file set can be detected. It adds no member-facing history, but
+it retains deleted or changed data until the operator's backup rotation removes
+that snapshot. Backups are plain files unless the operator encrypts the storage;
+they require the same access restrictions as the live database.
 
 A community may set how long it keeps messages and how long it keeps shared
 images, in whole days. Both default to keeping everything, so an instance that

@@ -4,7 +4,8 @@ Campfire is a self-hosted, Discord-style chat server for a small group of people
 who already know each other. It is deliberately dependency-free: Python serves
 the API and the static client, SQLite stores everything, and browsers receive
 live messages over Server-Sent Events. No build step, no package manager, no
-third-party service.
+third-party application service. The supported public deployment adds a local
+HTTPS reverse proxy; Campfire itself still makes no outbound service calls.
 
 It is built around a few refusals — no advertising, no analytics, no telemetry,
 no public discovery, no remote assets — and around collecting only the data a
@@ -16,22 +17,34 @@ requested feature actually needs.
 images, roles, moderation, retention and data export all work and are covered by
 tests.
 
-**It is not ready to put on the internet yet.** It runs on Python's development
-HTTP server, has no versioned migrations, and has no backup or restore commands.
-Run it on a trusted network, or behind a reverse proxy you maintain, and read
-the [self-hosting guide](docs/SELF-HOSTING.md) first. Making it properly
-deployable is the next milestone.
+**Reproducible self-hosting is complete.** Versioned transactional migrations,
+verified database/upload snapshots, offline restore, fail-closed public
+configuration, a non-root Docker image, and a minimal Caddy Compose deployment
+are covered by the [self-hosting guide](docs/SELF-HOSTING.md).
 
-Milestones 1 and 2 of the [roadmap](ROADMAP.md) are done. What is missing is
-voice, direct messages, reactions, replies, search, and reproducible deployment.
+Milestones 1–3 of the [roadmap](ROADMAP.md) are done. What is missing is voice,
+direct messages, reactions, replies, and search.
 
 ## Run it
 
 ```bash
-python3 server.py
+python3 -m campfire serve
 ```
 
 Open <http://localhost:8000>.
+
+For an internet-facing instance, use the included non-root Compose/Caddy stack:
+
+```bash
+cp .env.example .env
+# Set CAMPFIRE_DOMAIN, then prepare backups as described in the guide.
+docker compose build --pull campfire
+docker compose up -d
+```
+
+Do not publish the application port directly. The complete
+[self-hosting runbook](docs/SELF-HOSTING.md) covers DNS, permissions, signed
+release verification, upgrades, verified backups, restore, and rollback.
 
 The first account you create becomes the owner of its own community — no invite
 needed. Every account after the first needs one, so registration is closed by
@@ -42,8 +55,9 @@ header, and create a 24-hour code. Codes are shown once, at creation, because
 only their digest is stored. Revoking a code invalidates every copy of it
 immediately.
 
-Data lands in `data/campfire.db` and `data/uploads/`. Back them up together —
-the database holds the filenames and permissions, the directory holds the bytes.
+Data lands in `data/campfire.db` and `data/uploads/`. Snapshot and verify both
+together with `python3 -m campfire backup BACKUP_DIR`; copying one path alone is
+not a consistent backup.
 
 ## Using it
 
@@ -145,6 +159,7 @@ trusted network.
 | `CAMPFIRE_UPLOAD_DIR` | `data/uploads` | Where image bytes are stored |
 | `CAMPFIRE_MAX_UPLOAD_BYTES` | `8388608` | Per-image size limit |
 | `CAMPFIRE_MAX_STORAGE_BYTES` | `0` | Total image ceiling; `0` means none |
+| `CAMPFIRE_STORAGE_WARNING_PERCENT` | `90` | Warn when image or filesystem capacity reaches this percentage |
 | `CAMPFIRE_RETENTION_SWEEP_SECONDS` | `3600` | How often retention runs |
 | `CAMPFIRE_SECURE_COOKIES` | `0` | Set to `1` when serving over HTTPS |
 | `CAMPFIRE_ORIGIN` | unset | Public origin, no trailing slash |
@@ -154,11 +169,16 @@ trusted network.
 | `CAMPFIRE_MAX_EVENT_STREAMS_PER_USER` | `8` | Live connections per account |
 
 ```bash
-CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 server.py
+CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 -m campfire serve
 ```
 
 `CAMPFIRE_ORIGIN` and `CAMPFIRE_TRUSTED_PROXIES` are security-sensitive. The
-[self-hosting guide](docs/SELF-HOSTING.md) explains what each one changes.
+[self-hosting guide](docs/SELF-HOSTING.md) explains what each one changes. A
+non-loopback listener fails before migration or binding unless HTTPS origin,
+secure cookies, trusted proxy, and a storage ceiling are all configured.
+
+The operator CLI also provides `check-config`, `migrate`, `backup`,
+`verify-backup`, and offline `restore --confirm` commands.
 
 ## Test it
 
@@ -174,6 +194,8 @@ python3 -m unittest discover -s tests -v
 - [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md) — deployment, backups, configuration
 - [docs/API.md](docs/API.md) — the HTTP contract
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module boundaries and where things live
+- [docs/RELEASES.md](docs/RELEASES.md) — signed releases and automated scanning
+- [SECURITY.md](SECURITY.md) — private vulnerability reporting and release verification
 
 Read the security and privacy documents before inviting anyone. Campfire is an
 original implementation and uses no Discord branding or assets.

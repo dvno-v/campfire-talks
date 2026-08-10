@@ -1,0 +1,83 @@
+services:
+  campfire:
+    build:
+      context: .
+    image: campfire:${CAMPFIRE_VERSION:-local}
+    restart: unless-stopped
+    environment:
+      CAMPFIRE_HOST: 0.0.0.0
+      CAMPFIRE_PORT: 8000
+      CAMPFIRE_DB: /data/campfire.db
+      CAMPFIRE_UPLOAD_DIR: /data/uploads
+      CAMPFIRE_ORIGIN: https://${CAMPFIRE_DOMAIN:?Set CAMPFIRE_DOMAIN in .env}
+      CAMPFIRE_SECURE_COOKIES: 1
+      CAMPFIRE_TRUSTED_PROXIES: 172.31.238.2
+      CAMPFIRE_MAX_STORAGE_BYTES: ${CAMPFIRE_MAX_STORAGE_BYTES:-10737418240}
+      CAMPFIRE_STORAGE_WARNING_PERCENT: ${CAMPFIRE_STORAGE_WARNING_PERCENT:-90}
+      CAMPFIRE_ACCESS_LOG: 0
+    volumes:
+      - campfire-data:/data
+      - ./backups:/backups
+    expose:
+      - "8000"
+    networks:
+      campfire-private:
+        ipv4_address: 172.31.238.3
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    depends_on:
+      campfire:
+        condition: service_healthy
+    environment:
+      CAMPFIRE_DOMAIN: ${CAMPFIRE_DOMAIN:?Set CAMPFIRE_DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      campfire-private:
+        ipv4_address: 172.31.238.2
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+
+networks:
+  campfire-private:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.238.0/24
+
+volumes:
+  campfire-data:
+  caddy-data:
+  caddy-config:

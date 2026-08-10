@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Development entry point for Campfire."""
+"""Compatibility entry point for `python server.py`."""
 
 from campfire.http import main
 

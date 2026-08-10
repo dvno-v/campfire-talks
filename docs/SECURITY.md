@@ -95,6 +95,12 @@ encrypted. A compromised host, browser, or administrator can read them.
   network first, and it is counted from the same attachment rows that
   authorization and deletion use. Usage reporting requires administering at
   least one community.
+- Liveness and readiness probes are unauthenticated so a local supervisor can
+  use them, but expose no account data, paths, capacity totals, or exception
+  text. Readiness checks the required schema, writable data locations, and that
+  their filesystems are not completely full;
+  approaching capacity is a warning rather than a failure so a full image
+  allowance does not unnecessarily take text chat out of service.
 - Retention windows are set per community by administrators and owners, are
   bounded to 0–3650 days, and default to keeping everything. The sweep runs on
   a timer off the request path and survives a failed pass rather than ending
@@ -129,6 +135,21 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Live streams are bounded per host and per account, so opening connections
   cannot exhaust threads and memory; past the limit Campfire answers `503`.
 - Access logging is disabled unless the operator explicitly enables it.
+- A non-loopback listener fails before migration or binding unless it has one
+  exact HTTPS origin, secure cookies, an explicit trusted proxy, and a finite
+  storage ceiling. Numeric configuration is range-checked, and contradictory
+  event-stream limits are rejected.
+- Schema migrations are ordered, recorded, and individually transactional.
+  The backup command holds SQLite's writer reservation while copying the exact
+  referenced upload set; manifests bind database and files with SHA-256, and
+  restore validates everything before taking an exclusive offline lock.
+- The supported container runs without root or Linux capabilities, with a
+  read-only application filesystem and no published application port. The
+  included Caddy proxy terminates HTTPS, replaces forwarding metadata, bounds
+  request size, and discards access/runtime logs.
+- Release assets receive signed GitHub/Sigstore provenance attestations.
+  CodeQL and container scanning run on changes and weekly, and workflow Actions
+  are pinned to immutable commit identifiers.
 
 The password parameters follow OWASP's PBKDF2-HMAC-SHA256 guidance. Python's
 standard library also recommends salted, tunably slow password derivation:
@@ -139,14 +160,14 @@ standard library also recommends salted, tunably slow password derivation:
 - [OWASP HTTP Security Headers Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
 - [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
 
-## Known gaps before public exposure
+## Known gaps
 
 - The standard-library HTTP server has not undergone production hardening or an
   independent security audit.
 - There is no multi-factor authentication, password reset, or invisible-mode
   preference. Message deletion is joined by kick/ban and account deletion, but
-  channel-specific permissions, slow mode, audit logs, and temporary
-  moderation actions are not implemented yet.
+  per-channel read restrictions, audit logs, and temporary moderation actions
+  are not implemented yet.
 - Bans identify an account, not a person, network, device, or browser. Someone
   who obtains another invite can create a differently named account; Campfire
   intentionally does not persist IP addresses or add device fingerprinting to
@@ -156,18 +177,17 @@ standard library also recommends salted, tunably slow password derivation:
 - Voice and screen sharing are not implemented yet.
 - Uploads are rebuilt without metadata, but Campfire does not decode pixels, so
   this is not a defence against a malicious decoder input. Malware scanning and
-  storage quotas are not implemented. Signature checks are useful defence in
-  depth, not proof that an image is harmless.
+  per-account storage quotas are not implemented. Signature checks are useful
+  defence in depth, not proof that an image is harmless.
 - The in-memory limiter resets on restart and is not shared across processes.
 - SQLite backups are not automatically encrypted.
-- Dependency/container scanning and a disclosure process are not yet automated.
 
-For a few trusted friends behind a VPN or private overlay network, these gaps
-are manageable if everyone understands them. For an internet-facing service,
-address them and obtain a security review first.
+The included public deployment reduces avoidable exposure; it is not an
+independent security review or a guarantee that the application has no defects.
+Every operator and group should understand these gaps, keep releases current,
+and decide whether their threat model needs an external review first.
 
 ## Reporting a vulnerability
 
-Until a private reporting address is configured, do not publish a working
-exploit or sensitive instance data in a public issue. Contact the instance
-operator directly and agree on a disclosure path.
+Follow the repository-level [security policy](../SECURITY.md). Do not publish a
+working exploit, credentials, or sensitive instance data in a public issue.

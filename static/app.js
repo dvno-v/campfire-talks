@@ -655,9 +655,11 @@ async function loadStorage() {
       : `<p class="storage-line">${escapeHTML(formatBytes(used))} across ${Number(report.files)} image${Number(report.files) === 1 ? '' : 's'}. No limit is set; CAMPFIRE_MAX_STORAGE_BYTES sets one.</p>`;
     const drift = report.stored_bytes !== null && Number(report.stored_bytes) !== used
       ? `<p class="storage-line storage-drift">${escapeHTML(formatBytes(report.stored_bytes))} is actually on disk. A difference means files Campfire is not tracking.</p>` : '';
+    const warnings = (report.warnings || []).map(warning =>
+      `<p class="storage-line storage-warning">⚠ ${escapeHTML(warning.message)}</p>`).join('');
     const rows = report.communities.map(entry =>
       `<article class="invite-row"><div><strong>${escapeHTML(entry.name)}</strong><span>${escapeHTML(formatBytes(entry.bytes))} · ${Number(entry.files)} image${Number(entry.files) === 1 ? '' : 's'}</span></div></article>`).join('');
-    panel.innerHTML = meter + drift + rows;
+    panel.innerHTML = warnings + meter + drift + rows;
   } catch (error) { panel.innerHTML = `<p class="member-empty">${escapeHTML(error.message)}</p>`; }
 }
 $('#retention-form').onsubmit = async event => {

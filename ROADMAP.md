@@ -54,12 +54,14 @@ SQLite manually, and deletion behavior is covered by integration tests.
 
 ## Milestone 3 — Reproducible self-hosting
 
-- Versioned database migrations and transactional backup/restore commands
-- Docker image and minimal Compose deployment
-- HTTPS reverse-proxy example with metadata-minimized logs
-- Health/readiness endpoints and storage-capacity warnings
-- Configuration validation that fails closed for unsafe public deployments
-- Signed releases, dependency scanning, and a vulnerability-reporting policy
+Status: complete
+
+- [x] Versioned database migrations and transactional backup/restore commands
+- [x] Docker image and minimal Compose deployment
+- [x] HTTPS reverse-proxy example with metadata-minimized logs
+- [x] Health/readiness endpoints and storage-capacity warnings
+- [x] Configuration validation that fails closed for unsafe public deployments
+- [x] Signed releases, dependency scanning, and a vulnerability-reporting policy
 
 SQLite remains the preferred small-instance database. PostgreSQL is considered
 only when operational needs justify it.

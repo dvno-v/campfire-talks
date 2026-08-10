@@ -19,6 +19,7 @@ import unittest
 import zlib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 temporary = tempfile.TemporaryDirectory()
 os.environ.setdefault("CAMPFIRE_DB", str(Path(temporary.name) / "http.db"))
@@ -903,6 +904,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(report["limit_bytes"], 0, "no ceiling is configured by default")
         self.assertIsNone(report["available_bytes"])
+        self.assertIn("warnings", report)
         self.assertIn(self.community_id, [entry["id"] for entry in report["communities"]])
 
         original = campfire_http.MAX_STORAGE_BYTES
@@ -919,6 +921,37 @@ class HTTPTests(unittest.TestCase):
             self.assertIn("out of image storage", payload["error"])
         finally:
             campfire_http.MAX_STORAGE_BYTES = original
+
+    def test_health_and_readiness_do_not_require_a_session(self):
+        status, payload, _ = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), (200, {"status": "ok"}))
+
+        status, payload, _ = self.request("GET", "/readyz")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["checks"], {"database": "ok", "storage": "ok"})
+        self.assertIsInstance(payload["warnings"], list)
+
+    def test_readiness_fails_closed_without_disclosing_database_errors(self):
+        with patch.object(campfire_http, "connect",
+                          side_effect=database.sqlite3.OperationalError("secret path")):
+            status, payload, _ = self.request("GET", "/readyz")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["status"], "not_ready")
+        self.assertEqual(payload["checks"]["database"], "failed")
+        self.assertNotIn("secret path", json.dumps(payload))
+
+    def test_readiness_fails_when_a_data_filesystem_is_completely_full(self):
+        with patch.object(campfire_http, "filesystems_have_space", return_value=False):
+            status, payload, _ = self.request("GET", "/readyz")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["checks"], {"database": "ok", "storage": "failed"})
+
+    def test_readiness_rejects_an_unmigrated_schema(self):
+        with patch.object(campfire_http, "schema_version", return_value=0):
+            status, payload, _ = self.request("GET", "/readyz")
+        self.assertEqual(status, 503)
+        self.assertEqual(payload["checks"]["database"], "failed")
 
     def test_non_object_body_is_rejected_once(self):
         token = self.signed_in_user("array_body_user")

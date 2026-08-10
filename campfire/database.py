@@ -7,6 +7,9 @@ import time
 from datetime import datetime, timezone
 
 from .config import DB_PATH
+from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
+from .migrations.v002_legacy_compatibility import enforce_username_case_uniqueness
+from .migrations.v002_legacy_compatibility import rebuild_sessions_with_stable_ids
 
 
 def connect():
@@ -38,179 +41,74 @@ def restrict_permissions():
             os.chmod(path, 0o600)
 
 
+def schema_version(database):
+    """Return the latest recorded migration, or zero for an unversioned database."""
+    table = database.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    if not table:
+        return 0
+    row = database.execute("SELECT COALESCE(MAX(version),0) FROM schema_migrations").fetchone()
+    return int(row[0])
+
+
+def migrate_database(database, migrations=MIGRATIONS):
+    """Apply each pending migration in its own all-or-nothing transaction."""
+    versions = [migration.VERSION for migration in migrations]
+    if versions != list(range(1, len(versions) + 1)):
+        raise RuntimeError("Database migrations must be consecutive and start at version 1")
+
+    database.commit()
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        database.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL
+        )""")
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+
+    applied = {row[0] for row in database.execute(
+        "SELECT version FROM schema_migrations ORDER BY version")}
+    unknown = applied - set(versions)
+    if unknown:
+        raise RuntimeError(
+            f"Database schema is newer than this Campfire release (version {max(unknown)})")
+    expected_applied = set(range(1, max(applied, default=0) + 1))
+    if applied != expected_applied:
+        raise RuntimeError("Database migration history is incomplete")
+
+    for migration in migrations:
+        if migration.VERSION in applied:
+            continue
+        applied_at = utc_now()
+        database.execute("BEGIN IMMEDIATE")
+        try:
+            migration.apply(database, applied_at)
+            database.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",
+                (migration.VERSION, migration.NAME, applied_at))
+            database.execute(f"PRAGMA user_version = {migration.VERSION}")
+            database.commit()
+        except Exception:
+            database.rollback()
+            raise
+    return schema_version(database)
+
+
 def initialize_database():
-    with connect() as database:
-        database.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-          id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL COLLATE NOCASE,
-          password_hash TEXT NOT NULL, created_at TEXT NOT NULL
-        );
-        -- AUTOINCREMENT, so a revoked session's id is never handed to a later
-        -- one. A plain rowid is reused as soon as the highest row is deleted,
-        -- which would let a stale session list revoke the wrong session.
-        CREATE TABLE IF NOT EXISTS sessions (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          token TEXT NOT NULL UNIQUE,
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS communities (
-          id INTEGER PRIMARY KEY, name TEXT NOT NULL, owner_id INTEGER NOT NULL REFERENCES users(id),
-          created_at TEXT NOT NULL,
-          -- Zero means keep indefinitely, which stays the default: a community
-          -- that has never chosen is never quietly pruned.
-          message_retention_days INTEGER NOT NULL DEFAULT 0
-            CHECK (message_retention_days >= 0),
-          attachment_retention_days INTEGER NOT NULL DEFAULT 0
-            CHECK (attachment_retention_days >= 0)
-        );
-        CREATE TABLE IF NOT EXISTS memberships (
-          community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('administrator', 'moderator', 'member')),
-          PRIMARY KEY (community_id, user_id)
-        );
-        CREATE TABLE IF NOT EXISTS community_bans (
-          community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          banned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-          role_at_ban TEXT NOT NULL CHECK (role_at_ban IN ('administrator', 'moderator', 'member')),
-          created_at TEXT NOT NULL,
-          PRIMARY KEY (community_id, user_id)
-        );
-        CREATE TABLE IF NOT EXISTS channels (
-          id INTEGER PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
-          name TEXT NOT NULL, created_at TEXT NOT NULL,
-          post_min_role TEXT NOT NULL DEFAULT 'member'
-            CHECK (post_min_role IN ('administrator', 'moderator', 'member')),
-          slow_mode_seconds INTEGER NOT NULL DEFAULT 0 CHECK (slow_mode_seconds >= 0),
-          uploads_allowed INTEGER NOT NULL DEFAULT 1 CHECK (uploads_allowed IN (0, 1)),
-          UNIQUE (community_id, name)
-        );
-        CREATE TABLE IF NOT EXISTS messages (
-          id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-          author_id INTEGER NOT NULL REFERENCES users(id), body TEXT NOT NULL, created_at TEXT NOT NULL,
-          attachment_id INTEGER REFERENCES attachments(id), edited_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS invitations (
-          id INTEGER PRIMARY KEY,
-          community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
-          created_by INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          token_hash TEXT UNIQUE NOT NULL,
-          expires_at INTEGER NOT NULL,
-          max_uses INTEGER NOT NULL DEFAULT 10,
-          uses INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS attachments (
-          id INTEGER PRIMARY KEY,
-          channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-          uploader_id INTEGER NOT NULL REFERENCES users(id),
-          storage_name TEXT UNIQUE NOT NULL,
-          original_name TEXT NOT NULL,
-          mime_type TEXT NOT NULL,
-          byte_size INTEGER NOT NULL,
-          created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS channel_reads (
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-          last_read_message_id INTEGER NOT NULL DEFAULT 0,
-          PRIMARY KEY (user_id, channel_id)
-        );
-        CREATE TABLE IF NOT EXISTS notification_preferences (
-          user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-          mode TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS channel_notifications (
-          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-          mode TEXT NOT NULL,
-          PRIMARY KEY (user_id, channel_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id);
-        CREATE INDEX IF NOT EXISTS idx_invites_token ON invitations(token_hash);
-        """)
-        message_columns = {row[1] for row in database.execute("PRAGMA table_info(messages)")}
-        if "attachment_id" not in message_columns:
-            database.execute("ALTER TABLE messages ADD COLUMN attachment_id INTEGER REFERENCES attachments(id)")
-        if "edited_at" not in message_columns:
-            database.execute("ALTER TABLE messages ADD COLUMN edited_at TEXT")
-        membership_columns = {row[1] for row in database.execute("PRAGMA table_info(memberships)")}
-        if "role" not in membership_columns:
-            database.execute("""ALTER TABLE memberships ADD COLUMN role TEXT NOT NULL DEFAULT 'member'
-                                CHECK (role IN ('administrator', 'moderator', 'member'))""")
-        session_columns = {row[1] for row in database.execute("PRAGMA table_info(sessions)")}
-        if "created_at" not in session_columns:
-            database.execute("ALTER TABLE sessions ADD COLUMN created_at TEXT")
-            database.execute("UPDATE sessions SET created_at=? WHERE created_at IS NULL", (utc_now(),))
-        if "id" not in session_columns:
-            rebuild_sessions_with_stable_ids(database)
-        community_columns = {row[1] for row in database.execute("PRAGMA table_info(communities)")}
-        for column in ("message_retention_days", "attachment_retention_days"):
-            if column not in community_columns:
-                database.execute(f"ALTER TABLE communities ADD COLUMN {column} "
-                                 "INTEGER NOT NULL DEFAULT 0 CHECK (" + column + " >= 0)")
-        channel_columns = {row[1] for row in database.execute("PRAGMA table_info(channels)")}
-        if "post_min_role" not in channel_columns:
-            database.execute("ALTER TABLE channels ADD COLUMN post_min_role TEXT NOT NULL "
-                             "DEFAULT 'member' "
-                             "CHECK (post_min_role IN ('administrator', 'moderator', 'member'))")
-        if "slow_mode_seconds" not in channel_columns:
-            database.execute("ALTER TABLE channels ADD COLUMN slow_mode_seconds "
-                             "INTEGER NOT NULL DEFAULT 0 CHECK (slow_mode_seconds >= 0)")
-        if "uploads_allowed" not in channel_columns:
-            database.execute("ALTER TABLE channels ADD COLUMN uploads_allowed "
-                             "INTEGER NOT NULL DEFAULT 1 CHECK (uploads_allowed IN (0, 1))")
-        enforce_username_case_uniqueness(database)
+    database = connect()
+    try:
+        version = migrate_database(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
+        database.commit()
+    finally:
+        database.close()
     # WAL's side files appear only once something has been written.
     restrict_permissions()
-
-
-def rebuild_sessions_with_stable_ids(database):
-    """Give an older `sessions` table a surrogate key that is never reused.
-
-    A column cannot be promoted to AUTOINCREMENT in place, so the table is
-    rebuilt and its rows copied across. Everyone stays signed in: the tokens
-    are what authenticate, and they are carried over untouched.
-    """
-    database.executescript("""
-      CREATE TABLE sessions_rebuilt (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        token TEXT NOT NULL UNIQUE,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        expires_at INTEGER NOT NULL, created_at TEXT NOT NULL
-      );
-      INSERT INTO sessions_rebuilt(token,user_id,expires_at,created_at)
-        SELECT token,user_id,expires_at,created_at FROM sessions ORDER BY rowid;
-      DROP TABLE sessions;
-      ALTER TABLE sessions_rebuilt RENAME TO sessions;
-    """)
-
-
-def enforce_username_case_uniqueness(database):
-    """Guarantee that usernames differing only by case cannot coexist.
-
-    Sign-in resolves usernames case-insensitively, so `Sam` and `sam` as
-    separate accounts would let the older row answer for both and lock the
-    newer account out of its own name. Databases created before this rule may
-    already hold such pairs; refuse to start rather than silently choosing a
-    winner. Usernames are restricted to ASCII, which SQLite's NOCASE collation
-    folds completely.
-    """
-    collisions = database.execute("""
-      SELECT group_concat(username, ', ') AS names FROM users
-      GROUP BY username COLLATE NOCASE HAVING COUNT(*) > 1
-    """).fetchall()
-    if collisions:
-        conflicting = "; ".join(row["names"] for row in collisions)
-        raise RuntimeError(
-            "Campfire cannot start: these accounts differ only by capitalization "
-            f"and must be renamed or removed first: {conflicting}")
-    database.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_nocase ON users(username COLLATE NOCASE)")
+    return version
 
 
 def utc_now():

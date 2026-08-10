@@ -1,0 +1,53 @@
+name: Signed release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - name: Require tag to match Campfire version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          from campfire import __version__
+          expected = f"v{__version__}"
+          if os.environ["RELEASE_TAG"] != expected:
+              raise SystemExit(f"tag must be {expected}")
+          PY
+      - name: Test release commit
+        run: python -m unittest discover -s tests -v
+      - name: Build reproducible source archive and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="campfire-${RELEASE_TAG}/" \
+            --output="dist/campfire-${RELEASE_TAG}.tar.gz" HEAD
+          cd dist
+          sha256sum "campfire-${RELEASE_TAG}.tar.gz" > SHA256SUMS
+      - name: Sign provenance for every release asset
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/*
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes

@@ -457,3 +457,8 @@
 .storage-drift {
   color: var(--accent2);
 }
+
+.storage-warning {
+  color: #f4c36a;
+  font-weight: 600;
+}

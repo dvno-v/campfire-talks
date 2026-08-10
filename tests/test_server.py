@@ -7,6 +7,8 @@ import unittest
 import zlib
 from ipaddress import ip_network
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
@@ -21,7 +23,9 @@ from campfire.services.communities import list_community_bans, list_community_me
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from campfire.services.retention import purge_expired, set_retention
-from campfire.services.storage import exceeds_limit, tracked_bytes, usage as storage_usage
+from campfire.services.storage import capacity_warnings, exceeds_limit, filesystems_have_space
+from campfire.services.storage import tracked_bytes
+from campfire.services.storage import usage as storage_usage, writable_location
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
 from campfire.services.notifications import set_account_mode, set_channel_mode
 
@@ -76,7 +80,7 @@ class CampfireTests(unittest.TestCase):
             names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages",
                          "invitations", "attachments", "channel_reads", "notification_preferences",
-                         "channel_notifications", "community_bans"} <= names)
+                         "channel_notifications", "community_bans", "schema_migrations"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
@@ -85,6 +89,8 @@ class CampfireTests(unittest.TestCase):
         self.assertIn("role", membership_columns)
         self.assertIn("created_at", session_columns)
         self.assertIn("id", session_columns)
+        with database.connect() as db:
+            self.assertEqual(database.schema_version(db), 2)
 
     def test_existing_memberships_are_migrated_to_member_role(self):
         original_path = database.DB_PATH
@@ -506,6 +512,31 @@ class CampfireTests(unittest.TestCase):
                              "a limit of zero is no limit, which is the default")
             self.assertFalse(exceeds_limit(db, used + 100, 100))
             self.assertTrue(exceeds_limit(db, used + 100, 101))
+
+    def test_capacity_warnings_cover_the_image_limit_and_shared_filesystems(self):
+        with tempfile.TemporaryDirectory() as folder, database.connect() as db:
+            disk = SimpleNamespace(total=100, used=95, free=5)
+            with patch("campfire.services.storage.tracked_bytes", return_value=(95, 1)), \
+                 patch("campfire.services.storage.shutil.disk_usage", return_value=disk):
+                warnings = capacity_warnings(
+                    db, 100, Path(folder) / "uploads", Path(folder) / "campfire.db", 90)
+        self.assertEqual([warning["code"] for warning in warnings],
+                         ["image_storage_limit", "filesystem_capacity"])
+        self.assertEqual(warnings[-1]["percent"], 95)
+
+    def test_readiness_location_check_accepts_a_writable_parent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertTrue(writable_location(Path(folder) / "new" / "uploads", directory=True))
+            locked = Path(folder) / "locked"
+            locked.mkdir(mode=0o500)
+            self.assertFalse(writable_location(locked / "uploads", directory=True))
+
+    def test_readiness_capacity_check_rejects_a_full_filesystem(self):
+        with tempfile.TemporaryDirectory() as folder:
+            full = SimpleNamespace(total=100, used=100, free=0)
+            with patch("campfire.services.storage.shutil.disk_usage", return_value=full):
+                self.assertFalse(filesystems_have_space(Path(folder) / "campfire.db",
+                                                        Path(folder) / "uploads"))
 
     def test_image_signature_allowlist(self):
         self.assertEqual(uploads.detect_image_type(b"\x89PNG\r\n\x1a\nrest")[0], "image/png")

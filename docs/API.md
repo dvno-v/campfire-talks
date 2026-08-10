@@ -10,6 +10,29 @@ All errors have the form:
 {"error": "Human-readable explanation"}
 ```
 
+## Operator probes
+
+### `GET /healthz`
+
+An unauthenticated liveness probe. It returns `200` with `{"status":"ok"}`
+when the HTTP process can answer. It deliberately does not touch SQLite or the
+upload directory, so a dependency failure does not cause a supervisor to
+restart an otherwise healthy process in a loop.
+
+### `GET /readyz`
+
+An unauthenticated readiness probe. It verifies that the expected SQLite schema
+can be read and that the database and upload locations are writable and not
+completely full. It returns
+`200` with `status: "ready"`, or `503` with `status: "not_ready"` and a
+`Retry-After: 5` header. Named checks report only `ok` or `failed`; exception
+messages and filesystem paths are never exposed.
+
+The `warnings` array contains stable codes when Campfire's configured image
+ceiling or a filesystem it uses has crossed the warning percentage. Warnings do
+not make the instance unready: text chat can remain healthy when image uploads
+are near their separately configured ceiling.
+
 ## Authentication
 
 ### `POST /api/register`
@@ -171,6 +194,9 @@ Returns `used_bytes` and `files` for every image the instance is storing,
 `limit_bytes` (0 when no ceiling is configured), `available_bytes` (null with
 no ceiling), `stored_bytes` for what the upload directory actually occupies,
 and a `communities` breakdown of the ones the caller owns or administers.
+It also includes operator-facing `warnings`, each with a stable `code`, a
+whole-number `percent`, and a message. Exact host filesystem sizes are not
+returned because a shared volume can contain data unrelated to Campfire.
 Accounts that administer nothing receive `403`: disk usage is an operator's
 concern, and an ordinary member learning how much everyone has shared is not
 needed for the feature to work.
