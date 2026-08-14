@@ -18,6 +18,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Community retention windows (two day counts) | Scheduled deletion of old history | Until the community is deleted |
 | Invite digest and usage | Private onboarding | Up to 7 days; expired rows are removed at startup |
 | Channel posting rules (minimum role, slow-mode seconds, uploads allowed) | Community moderation | Until the channel is deleted |
+| Channel kind (`text` or `voice`) | Selecting the authorized feature path | Until the channel is deleted |
+| Voice lease digest, account/channel, room-key fingerprint, creation and expiry | Atomic participant/key limit | Deleted on leave or after 45 seconds |
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
 | Migration version, name, and application time | Safe reproducible upgrades | Lifetime of the database |
@@ -25,7 +27,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Empty process-lock files | Preventing concurrent servers and live restore | Lifetime of the database path |
 
 Raw passwords, raw session tokens, raw passkey ceremony tokens, authenticator
-private keys/biometrics, and raw invite codes are never stored.
+private keys/biometrics, raw invite codes, media room keys, and media frames are
+never stored by Campfire.
 Campfire does not persist IP addresses, user agents, device names, locations,
 or session activity. Authentication rate-limit state exists only in memory for
 five minutes.
@@ -53,7 +56,7 @@ verification succeeds or fails, preventing replay.
 An account can download everything Campfire stores about it as a single JSON
 file: the account row without its password hash, when each session began and
 expires without its digest, memberships and roles, every message it wrote,
-image metadata, passkey names and timestamps without credential material, read markers, notification preferences, invites it created, and
+image metadata, passkey names and timestamps without credential material, read markers, active voice-lease metadata without its token digest, notification preferences, invites it created, and
 bans it received. The file is plain text and depends on nothing Campfire hosts,
 so leaving does not mean losing your own history. It contains no one else's
 messages and nothing the account could not already see in the interface.
@@ -97,6 +100,23 @@ used. Restarting the server erases presence entirely. Whether you are currently
 connected is visible to people who already share a community with you, and to
 nobody else. There is no way to appear offline yet; if that matters to you,
 close the tab.
+
+A voice channel stores its `kind` on the channel. While joining, Campfire stores
+one expiring lease per account and channel: a digest of a random lease token,
+the SHA-256 fingerprint of the room key, creation time, and expiry. The raw
+lease and room key are not stored. Leaving removes the lease; abandoned leases
+expire after 45 seconds and are pruned on startup. A backup can contain an
+unexpired digest/fingerprint, but never media or the key, and restore startup
+removes leases already past expiry.
+
+LiveKit processes encrypted media and ephemeral room state. The Compose stack
+has no recording, transcription, egress, ingress, webhook, or metrics-export
+service and no media volume. The SFU and network operator can still observe IP
+addresses, account/room identifiers, connection time, packet size/rate,
+speaking activity, and connection quality. Warning/error Docker logs are small
+and rotating but may contain exceptional operational metadata. Media E2EE does
+not protect text chat or protect users from modified client code served by a
+compromised operator. [MEDIA.md](MEDIA.md) documents the exact boundary.
 
 An unread marker stores one number per account and channel: the highest message
 id that account has seen. No time of reading is recorded, so the database

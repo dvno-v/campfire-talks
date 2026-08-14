@@ -1,0 +1,65 @@
+# Loopback-only voice development on Linux. This file is standalone: do not
+# combine it with compose.yaml, whose Caddy/LiveKit settings are for a public
+# host with real DNS and a reachable external address.
+services:
+  campfire:
+    build:
+      context: .
+    image: campfire:local
+    restart: unless-stopped
+    depends_on:
+      - livekit
+    network_mode: host
+    environment:
+      CAMPFIRE_HOST: 127.0.0.1
+      CAMPFIRE_PORT: 8000
+      CAMPFIRE_DB: /data/campfire.db
+      CAMPFIRE_UPLOAD_DIR: /data/uploads
+      CAMPFIRE_ORIGIN: http://127.0.0.1:8000
+      CAMPFIRE_MEDIA_URL: ws://127.0.0.1:7880
+      CAMPFIRE_LIVEKIT_API_KEY: campfire-media
+      CAMPFIRE_LIVEKIT_API_SECRET_FILE: /run/secrets/livekit-keys.yaml
+      CAMPFIRE_MAX_VOICE_PARTICIPANTS: 8
+      CAMPFIRE_SECURE_COOKIES: 0
+      CAMPFIRE_MAX_STORAGE_BYTES: 10737418240
+      CAMPFIRE_STORAGE_WARNING_PERCENT: 90
+      CAMPFIRE_ACCESS_LOG: 0
+    volumes:
+      - campfire-local-data:/data
+      - ./secrets/livekit-keys.yaml:/run/secrets/livekit-keys.yaml:ro
+    user: "10001:10001"
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  livekit:
+    image: livekit/livekit-server:v1.13.4@sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --config
+      - /etc/livekit.local.yaml
+    volumes:
+      - ./deploy/livekit.local.yaml:/etc/livekit.local.yaml:ro
+      - ./secrets/livekit-keys.yaml:/run/secrets/livekit-keys.yaml:ro
+    user: "10001:10001"
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  campfire-local-data:

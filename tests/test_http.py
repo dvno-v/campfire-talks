@@ -6,6 +6,7 @@ tests that only call service functions.
 """
 
 import contextlib
+import base64
 import hashlib
 import http.client
 import json
@@ -188,12 +189,131 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(dict(headers)["Content-Type"],
                          "application/javascript; charset=utf-8")
+        self.assertIn("camera=()", dict(headers)["Permissions-Policy"])
         self.assertIn(b"Campfire", javascript)
+        for path, marker in (("/voice.js", b"CampfireVoice"),
+                             ("/livekit-e2ee-worker.js", b"onmessage")):
+            with self.subTest(path=path):
+                status, headers, script = self.raw_get(path)
+                self.assertEqual(status, 200)
+                self.assertEqual(dict(headers)["Content-Type"],
+                                 "application/javascript; charset=utf-8")
+                self.assertIn(marker, script)
 
         status, headers, frontend = self.raw_get("/channels/a-client-side-route")
         self.assertEqual(status, 200)
         self.assertEqual(dict(headers)["Content-Type"], "text/html; charset=utf-8")
         self.assertIn(b"<!doctype html>", frontend.lower())
+
+    def test_voice_channels_issue_narrow_bounded_leased_media_grants(self):
+        member = self.signed_in_user(f"voice_member_{time.time_ns()}")
+        outsider = self.signed_in_user(f"voice_outsider_{time.time_ns()}", member=False)
+        second = self.signed_in_user(f"voice_second_{time.time_ns()}")
+        third = self.signed_in_user(f"voice_third_{time.time_ns()}")
+        with patch.multiple(campfire_http, MEDIA_URL="wss://media.example.test",
+                            LIVEKIT_API_KEY="campfirekey",
+                            LIVEKIT_API_SECRET="s" * 32,
+                            MAX_VOICE_PARTICIPANTS=2):
+            status, channel, _ = self.request(
+                "POST", "/api/channels",
+                {"community_id": self.community_id, "name": f"voice-{time.time_ns()}",
+                 "kind": "voice"}, cookie=self.owner_session)
+            self.assertEqual(status, 201)
+            self.assertEqual(channel["kind"], "voice")
+            channel_id = channel["id"]
+
+            status, _, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/messages", {"body": "not here"},
+                cookie=member)
+            self.assertEqual(status, 409)
+            status, _, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "a" * 64}, cookie=outsider)
+            self.assertEqual(status, 403)
+
+            status, grant, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "a" * 64}, cookie=member)
+            self.assertEqual(status, 200)
+            claims_segment = grant["token"].split(".")[1]
+            claims = json.loads(base64.urlsafe_b64decode(
+                claims_segment + "=" * (-len(claims_segment) % 4)))
+            self.assertEqual(claims["video"]["room"], f"campfire-{channel_id}")
+            self.assertFalse(claims["video"]["canPublishData"])
+            self.assertEqual(set(claims["video"]["canPublishSources"]),
+                             {"microphone", "screen_share", "screen_share_audio"})
+            self.assertLessEqual(claims["exp"] - claims["nbf"], 125)
+
+            status, _, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "b" * 64}, cookie=second)
+            self.assertEqual(status, 409, "an occupied room must use one E2EE key")
+            status, _, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "a" * 64}, cookie=second)
+            self.assertEqual(status, 200)
+            status, _, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "a" * 64}, cookie=third)
+            self.assertEqual(status, 409, "the lease count must enforce the room ceiling")
+
+            status, renewed, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/heartbeat",
+                {"lease": grant["lease"]}, cookie=member)
+            self.assertEqual((status, renewed["ok"]), (200, True))
+            status, released, _ = self.request(
+                "DELETE", f"/api/channels/{channel_id}/voice/lease",
+                {"lease": grant["lease"]}, cookie=member)
+            self.assertEqual((status, released["ok"]), (200, True))
+            with patch.object(campfire_http, "MEDIA_TOKEN_LIMITER",
+                              security.RateLimiter(attempts=1, window=60)):
+                status, _, _ = self.request(
+                    "POST", f"/api/channels/{channel_id}/voice/token",
+                    {"key_fingerprint": "a" * 64}, cookie=member)
+                self.assertEqual(status, 200)
+                status, _, _ = self.request(
+                    "POST", f"/api/channels/{channel_id}/voice/token",
+                    {"key_fingerprint": "a" * 64}, cookie=member)
+                self.assertEqual(status, 429)
+
+    def test_a_refused_voice_key_says_whether_to_ask_for_a_link_or_to_wait(self):
+        """The old single message sent people after a link that may not exist."""
+        member = self.signed_in_user(f"voice_holder_{time.time_ns()}")
+        second = self.signed_in_user(f"voice_asker_{time.time_ns()}")
+        with patch.multiple(campfire_http, MEDIA_URL="wss://media.example.test",
+                            LIVEKIT_API_KEY="campfirekey",
+                            LIVEKIT_API_SECRET="s" * 32):
+            status, channel, _ = self.request(
+                "POST", "/api/channels",
+                {"community_id": self.community_id, "name": f"voice-{time.time_ns()}",
+                 "kind": "voice"}, cookie=self.owner_session)
+            self.assertEqual(status, 201)
+            channel_id = channel["id"]
+
+            status, grant, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "a" * 64}, cookie=member)
+            self.assertEqual(status, 200)
+
+            # Nobody has confirmed the place yet, so there is no one to ask.
+            status, refused, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "b" * 64}, cookie=second)
+            self.assertEqual(status, 409)
+            self.assertIn("Try again in", refused["error"])
+            self.assertNotIn("call link", refused["error"])
+
+            status, renewed, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/heartbeat",
+                {"lease": grant["lease"]}, cookie=member)
+            self.assertEqual((status, renewed["ok"]), (200, True))
+
+            status, refused, _ = self.request(
+                "POST", f"/api/channels/{channel_id}/voice/token",
+                {"key_fingerprint": "b" * 64}, cookie=second)
+            self.assertEqual(status, 409)
+            self.assertIn("current call link", refused["error"])
+            self.assertIn("Somebody else is", refused["error"])
 
     def test_static_manifest_covers_every_packaged_frontend_file(self):
         manifested = {filename for _, filename in campfire_http._STATIC_MANIFEST}

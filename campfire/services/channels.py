@@ -30,7 +30,7 @@ def channel_context(database, channel_id, actor_id):
     """
     return database.execute("""
       SELECT ch.id,ch.name,ch.community_id,ch.post_min_role,ch.slow_mode_seconds,
-             ch.uploads_allowed,
+             ch.uploads_allowed,ch.kind,
              CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END role
       FROM channels ch
       JOIN communities c ON c.id=ch.community_id
@@ -41,7 +41,7 @@ def channel_context(database, channel_id, actor_id):
 
 def settings_payload(row):
     """The posting rules a client needs to render one channel's composer."""
-    return {"post_min_role": row["post_min_role"],
+    return {"kind": row["kind"], "post_min_role": row["post_min_role"],
             "slow_mode_seconds": row["slow_mode_seconds"],
             "uploads_allowed": bool(row["uploads_allowed"])}
 
@@ -53,6 +53,8 @@ def may_post(database, context, actor_id, uploading=False, now=None):
     ``"role"`` and the whole seconds still to wait for ``"slow_mode"``, so the
     HTTP layer can say what is wrong rather than only that something is.
     """
+    if context["kind"] != "text":
+        return "voice_channel", None
     if ROLE_RANK[context["role"]] < ROLE_RANK[context["post_min_role"]]:
         return "role", context["post_min_role"]
     if uploading and not context["uploads_allowed"]:
@@ -104,5 +106,6 @@ def update_settings(database, channel_id, actor_id, post_min_role, slow_mode_sec
                         SET post_min_role=?,slow_mode_seconds=?,uploads_allowed=? WHERE id=?""",
                      (post_min_role, slow_mode_seconds, int(bool(uploads_allowed)), channel_id))
     return {"id": channel_id, "community_id": context["community_id"], "name": context["name"],
+            "kind": context["kind"],
             "post_min_role": post_min_role, "slow_mode_seconds": slow_mode_seconds,
             "uploads_allowed": bool(uploads_allowed)}

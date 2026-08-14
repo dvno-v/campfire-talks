@@ -55,24 +55,24 @@ class OperationTests(unittest.TestCase):
         with closing(database.connect()) as connection, connection:
             applied = connection.execute(
                 "SELECT version,name FROM schema_migrations ORDER BY version").fetchall()
-            self.assertEqual([row[0] for row in applied], [1, 2, 3])
+            self.assertEqual([row[0] for row in applied], [1, 2, 3, 4])
 
             def fail_migration(db, _timestamp):
                 db.execute("CREATE TABLE must_rollback(value TEXT)")
                 raise RuntimeError("simulated migration failure")
 
-            failing = SimpleNamespace(VERSION=4, NAME="failure", apply=fail_migration)
+            failing = SimpleNamespace(VERSION=5, NAME="failure", apply=fail_migration)
             with self.assertRaisesRegex(RuntimeError, "simulated"):
                 database.migrate_database(connection, MIGRATIONS + (failing,))
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='must_rollback'").fetchone())
-            self.assertEqual(database.schema_version(connection), 3)
+            self.assertEqual(database.schema_version(connection), 4)
 
     def test_backup_is_self_verifying_and_restore_replaces_database_and_files(self):
         destination = self.root / "backups" / "before-change"
         (self.upload_dir / "untracked.tmp").write_bytes(b"not database content")
         manifest = create_backup(destination, self.database_path, self.upload_dir)
-        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["schema_version"], 4)
         entries_before_verify = sorted(path.name for path in destination.iterdir())
         self.assertEqual(verify_backup(destination)["attachments"][0]["name"], "stored.png")
         self.assertEqual(sorted(path.name for path in destination.iterdir()), entries_before_verify)
@@ -113,7 +113,7 @@ class OperationTests(unittest.TestCase):
         manifest = create_encrypted_backup(
             destination, key_file, self.database_path, self.upload_dir)
         encrypted = destination.read_bytes()
-        self.assertEqual(manifest["schema_version"], 3)
+        self.assertEqual(manifest["schema_version"], 4)
         self.assertNotIn(self.content, encrypted)
         self.assertNotIn(b"backup_owner", encrypted)
         self.assertEqual(
@@ -258,6 +258,42 @@ class ConfigurationTests(unittest.TestCase):
                 UPLOAD_DIR=Path(folder) / "data" / "uploads"):
             with self.assertRaisesRegex(config.ConfigError, "non-nested"):
                 config.validate_configuration()
+
+    def test_media_configuration_is_all_or_nothing_secure_and_separate(self):
+        self.assertEqual(config._livekit_secret(
+            "media-key: " + "a" * 64, "media-key", True), ("a" * 64, False))
+        self.assertEqual(config._livekit_secret(
+            "another-key: " + "a" * 64, "media-key", True), ("", True))
+        self.assertEqual(config._livekit_secret("native secret", "media-key", False),
+                         ("native secret", False))
+        safe = dict(HOST="127.0.0.1", PUBLIC_ORIGIN="https://chat.example.net",
+                    SECURE_COOKIES=True, TRUSTED_PROXIES=(), MAX_STORAGE_BYTES=0,
+                    MAX_EVENT_STREAMS=32, MAX_EVENT_STREAMS_PER_USER=4,
+                    _LIVEKIT_KEY_FILE_INVALID=False)
+        invalid = (
+            {"MEDIA_URL": "wss://media.example.net", "LIVEKIT_API_KEY": "", "LIVEKIT_API_SECRET": ""},
+            {"MEDIA_URL": "ws://media.example.net", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://chat.example.net", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://CHAT.example.net.", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://media.example.net:not-a-port", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://media.example.net;script-src", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://media.exam\tple.net", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "s" * 32},
+            {"MEDIA_URL": "wss://media.example.net", "LIVEKIT_API_KEY": "media-key", "LIVEKIT_API_SECRET": "short"},
+        )
+        for media in invalid:
+            with self.subTest(media=media["MEDIA_URL"]), patch.multiple(config, **safe, **media):
+                with self.assertRaises(config.ConfigError):
+                    config.validate_configuration()
+        with patch.multiple(config, **safe, MEDIA_URL="wss://media.example.net",
+                            LIVEKIT_API_KEY="media-key", LIVEKIT_API_SECRET="s" * 32):
+            self.assertTrue(config.validate_configuration())
+        with patch.multiple(
+                config, HOST="127.0.0.1", PUBLIC_ORIGIN="http://127.0.0.1:8000",
+                SECURE_COOKIES=False, TRUSTED_PROXIES=(), MAX_STORAGE_BYTES=0,
+                MAX_EVENT_STREAMS=32, MAX_EVENT_STREAMS_PER_USER=4,
+                MEDIA_URL="ws://127.0.0.1:7880", LIVEKIT_API_KEY="media-key",
+                LIVEKIT_API_SECRET="s" * 32, _LIVEKIT_KEY_FILE_INVALID=False):
+            self.assertTrue(config.validate_configuration())
 
 
 if __name__ == "__main__":

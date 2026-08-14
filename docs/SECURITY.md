@@ -80,8 +80,15 @@ encrypted. A compromised host, browser, or administrator can read them.
 - State-changing browser requests reject cross-site fetches and mismatched
   `Origin` headers.
 - Responses apply a same-origin Content Security Policy, deny framing and MIME
-  sniffing, disable indexing, and restrict camera, microphone, and display
-  capture to the application origin.
+  sniffing, disable indexing, deny camera/geolocation, and restrict microphone
+  and display capture to the application origin.
+- Voice join grants are valid for two minutes, name one LiveKit room, and allow
+  only microphone and screen tracks. An immediate transaction checks current
+  community membership, one room-key fingerprint, and an eight-participant
+  expiring lease. Media encoded-frame E2EE is mandatory in the browser; the
+  random key is distributed only in a URL fragment and never reaches either
+  server. The complete protocol and operator boundary are in
+  [MEDIA.md](MEDIA.md).
 - Frontend files are loaded from an explicit reviewed manifest with fixed
   content types. Request paths only select an in-memory response; they are never
   joined to filesystem paths or used to construct HTTP headers. Traversal and
@@ -203,7 +210,13 @@ standard library also recommends salted, tunably slow password derivation:
   prevent this.
 - Messages are not end-to-end encrypted and are retained until someone deletes
   them. Deletion does not reach backups taken beforehand.
-- Voice and screen sharing are not implemented yet.
+- Media E2EE does not hide network metadata and cannot defend against a
+  compromised browser or an operator who serves modified JavaScript. Existing
+  LiveKit participants are not synchronously removed at the SFU by a Campfire
+  kick. The supplied browser leaves on its membership event (or failed lease
+  renewal), but a hostile client already connected can remain until its media
+  connection ends. High-risk use
+  needs independent protocol/code review and stronger active revocation.
 - Uploads are rebuilt without metadata, but Campfire does not decode pixels, so
   this is not a defence against a malicious decoder input. Malware scanning and
   per-account storage quotas are not implemented. Signature checks are useful

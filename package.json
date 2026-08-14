@@ -1,0 +1,15 @@
+{
+  "name": "campfire-media-client",
+  "private": true,
+  "scripts": {
+    "build": "npm run build:voice && npm run build:e2ee",
+    "build:voice": "esbuild frontend/voice.js --bundle --minify --format=iife --platform=browser --target=es2022 --outfile=static/voice.js",
+    "build:e2ee": "esbuild frontend/e2ee-worker.js --bundle --minify --format=esm --platform=browser --target=es2022 --outfile=static/livekit-e2ee-worker.js"
+  },
+  "dependencies": {
+    "livekit-client": "2.21.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9"
+  }
+}

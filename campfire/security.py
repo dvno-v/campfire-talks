@@ -72,6 +72,9 @@ AUTH_LIMITER = RateLimiter()
 # a substitute: an attacker must never allocate memory by inventing usernames.
 AUTH_IP_LIMITER = RateLimiter(attempts=30, window=300)
 UPLOAD_LIMITER = RateLimiter(attempts=20, window=60)
+# Token minting is cheap but writes a lease each time. A compromised member
+# must not be able to turn that narrow endpoint into an unbounded SQLite writer.
+MEDIA_TOKEN_LIMITER = RateLimiter(attempts=12, window=60)
 
 
 def parse_address(raw):

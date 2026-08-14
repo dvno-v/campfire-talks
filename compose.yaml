@@ -10,6 +10,10 @@ services:
       CAMPFIRE_DB: /data/campfire.db
       CAMPFIRE_UPLOAD_DIR: /data/uploads
       CAMPFIRE_ORIGIN: https://${CAMPFIRE_DOMAIN:?Set CAMPFIRE_DOMAIN in .env}
+      CAMPFIRE_MEDIA_URL: wss://${CAMPFIRE_MEDIA_DOMAIN:?Set CAMPFIRE_MEDIA_DOMAIN in .env}
+      CAMPFIRE_LIVEKIT_API_KEY: ${CAMPFIRE_LIVEKIT_API_KEY:-campfire-media}
+      CAMPFIRE_LIVEKIT_API_SECRET_FILE: /run/secrets/livekit-keys.yaml
+      CAMPFIRE_MAX_VOICE_PARTICIPANTS: 8
       CAMPFIRE_SECURE_COOKIES: 1
       CAMPFIRE_TRUSTED_PROXIES: 172.31.238.2
       CAMPFIRE_MAX_STORAGE_BYTES: ${CAMPFIRE_MAX_STORAGE_BYTES:-10737418240}
@@ -21,6 +25,7 @@ services:
       CAMPFIRE_ACCESS_LOG: 0
     volumes:
       - campfire-data:/data
+      - ./secrets/livekit-keys.yaml:/run/secrets/livekit-keys.yaml:ro
     expose:
       - "8000"
     networks:
@@ -54,10 +59,10 @@ services:
         condition: service_healthy
     environment:
       CAMPFIRE_DOMAIN: ${CAMPFIRE_DOMAIN:?Set CAMPFIRE_DOMAIN in .env}
+      CAMPFIRE_MEDIA_DOMAIN: ${CAMPFIRE_MEDIA_DOMAIN:?Set CAMPFIRE_MEDIA_DOMAIN in .env}
     ports:
       - "80:80"
       - "443:443"
-      - "443:443/udp"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -80,6 +85,44 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+
+  livekit:
+    image: livekit/livekit-server:v1.13.4@sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0
+    restart: unless-stopped
+    command:
+      - --config
+      - /etc/livekit.yaml
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/livekit.yaml:/etc/livekit.yaml:ro
+      - ./secrets/livekit-keys.yaml:/run/secrets/livekit-keys.yaml:ro
+    networks:
+      campfire-private:
+        ipv4_address: 172.31.238.4
+      media-public:
+    user: "10001:10001"
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 2.0
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
     logging:
@@ -129,6 +172,8 @@ networks:
       config:
         - subnet: 172.31.238.0/24
   caddy-public:
+    driver: bridge
+  media-public:
     driver: bridge
 
 volumes:

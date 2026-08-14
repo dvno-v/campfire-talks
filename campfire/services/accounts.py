@@ -110,6 +110,11 @@ def export_account(database, actor_id, exported_at=None):
           FROM channel_reads r JOIN channels ch ON ch.id=r.channel_id
           JOIN communities c ON c.id=ch.community_id
           WHERE r.user_id=? ORDER BY r.channel_id"""),
+        "active_voice_leases": rows("""
+          SELECT c.name community,ch.name channel,v.key_fingerprint,v.created_at,v.expires_at
+          FROM voice_leases v JOIN channels ch ON ch.id=v.channel_id
+          JOIN communities c ON c.id=ch.community_id
+          WHERE v.user_id=? ORDER BY v.channel_id"""),
         "notification_preferences": {
             "default_mode": (database.execute(
                 "SELECT mode FROM notification_preferences WHERE user_id=?",

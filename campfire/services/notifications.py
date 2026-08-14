@@ -39,7 +39,7 @@ _STATE_QUERY = """
   LEFT JOIN channel_notifications n ON n.channel_id=ch.id AND n.user_id=?
   LEFT JOIN messages m ON m.channel_id=ch.id
        AND m.id>COALESCE(r.last_read_message_id, 0) AND m.author_id<>?
-  WHERE (? IS NULL OR ch.id=?)
+  WHERE ch.kind='text' AND (? IS NULL OR ch.id=?)
   GROUP BY ch.id
 """
 
@@ -49,7 +49,7 @@ def readable_channel(database, channel_id, user_id):
     return database.execute("""
       SELECT 1 FROM channels ch
       JOIN memberships m ON m.community_id=ch.community_id AND m.user_id=?
-      WHERE ch.id=?
+      WHERE ch.id=? AND ch.kind='text'
     """, (user_id, channel_id)).fetchone() is not None
 
 
@@ -97,7 +97,7 @@ def mark_community_read(database, community_id, user_id):
     database.execute("""
       INSERT INTO channel_reads(user_id,channel_id,last_read_message_id)
       SELECT ?, ch.id, COALESCE((SELECT MAX(m.id) FROM messages m WHERE m.channel_id=ch.id), 0)
-      FROM channels ch WHERE ch.community_id=?
+      FROM channels ch WHERE ch.community_id=? AND ch.kind='text'
       ON CONFLICT(user_id,channel_id) DO NOTHING
     """, (user_id, community_id))
 

@@ -182,6 +182,10 @@ It should print only the intended version, for example:
 Run the full test suite from the repository root:
 
 ```bash
+npm ci --ignore-scripts --no-audit --no-fund
+npm run build
+git diff --exit-code -- static/voice.js static/livekit-e2ee-worker.js
+npm audit --audit-level=high
 python3 -m unittest discover -s tests -v
 ```
 
@@ -209,7 +213,8 @@ docker build --tag campfire:release-check .
 Then validate the public Compose model with a harmless example domain:
 
 ```bash
-env CAMPFIRE_DOMAIN=chat.example.net docker compose config --quiet
+env CAMPFIRE_DOMAIN=chat.example.net CAMPFIRE_MEDIA_DOMAIN=media.example.net \
+  docker compose config --quiet
 ```
 
 That final command prints nothing on success. It does not contact the example
@@ -584,11 +589,11 @@ that Tests and Security scanning succeeded on the exact commit before tagging.
 
 ### Dependabot
 
-`.github/dependabot.yml` checks Docker image references and GitHub Actions every
-week. Updates arrive as ordinary pull requests and must pass review and the same
-automation. GitHub Actions are pinned to immutable commit SHAs, and container
-base images are pinned to digests, so an upstream moving tag cannot silently
-change a build.
+`.github/dependabot.yml` checks the npm lock, Docker image references, and GitHub
+Actions every week. Updates arrive as ordinary pull requests and must pass
+review and the same automation. Browser/build packages are exactly locked,
+GitHub Actions are pinned to immutable commit SHAs, and container base images
+are pinned to digests, so an upstream moving tag cannot silently change a build.
 
 Campfire currently has no third-party Python packages. If one is introduced, it
 must be pinned in a lock file, included in vulnerability automation and release

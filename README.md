@@ -3,10 +3,10 @@
 Campfire is a self-hosted, Discord-style chat server for a small group of people
 who already know each other. Python serves the API and static client, SQLite
 stores everything, and browsers receive live messages over Server-Sent Events.
-There is no frontend build or hosted application dependency. A small pinned
+The reviewed browser media bundle is built from exact npm dependencies and is
+served locally; no hosted application or remote asset is loaded. A small pinned
 Python dependency set provides the production HTTP and WebAuthn layers. The
-supported public deployment adds a local HTTPS reverse proxy; Campfire itself
-still makes no outbound service calls.
+supported public deployment adds local Caddy and LiveKit services.
 
 It is built around a few refusals — no advertising, no analytics, no telemetry,
 no public discovery, no remote assets — and around collecting only the data a
@@ -14,9 +14,11 @@ requested feature actually needs.
 
 ## Where it stands
 
-**Private text chat is complete.** Accounts, communities, channels, messages,
+**Private text and E2EE media chat are implemented.** Accounts, communities, channels, messages,
 images, roles, moderation, retention and data export all work and are covered by
-tests.
+tests. Voice, screen sharing, bounded media grants, mandatory media E2EE, and a
+self-hosted SFU are implemented; router/TURN/browser field acceptance remains
+specific to each deployment.
 
 **Reproducible self-hosting is complete.** Versioned transactional migrations,
 authenticated encrypted database/upload snapshots, offline restore, passkeys,
@@ -24,8 +26,9 @@ fail-closed public configuration, a bounded production HTTP server, and an
 isolated non-root Caddy Compose deployment are covered by the
 [self-hosting guide](docs/SELF-HOSTING.md).
 
-Milestones 1–3 of the [roadmap](ROADMAP.md) are done. What is missing is voice,
-direct messages, reactions, replies, and search.
+Milestones 1–3 of the [roadmap](ROADMAP.md) are complete and Milestone 4's code
+is delivered with an explicit [media field-verification runbook](docs/MEDIA.md).
+What is missing is direct messages, reactions, replies, and search.
 
 ## Run it
 
@@ -37,11 +40,28 @@ python3 -m venv .venv
 
 Open <http://localhost:8000>.
 
+To test voice on the same Linux machine, use the standalone loopback Compose
+profile. It gives LiveKit a browser-reachable loopback ICE address instead of
+trying to discover a public address:
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 700 secrets
+openssl rand -hex 32 | sed 's/^/campfire-media: /' | sudo tee secrets/livekit-keys.yaml >/dev/null
+sudo chown 10001:10001 secrets/livekit-keys.yaml
+sudo chmod 600 secrets/livekit-keys.yaml
+docker compose -f compose.local.yaml up --build
+```
+
+Open <http://127.0.0.1:8000> in two browser profiles. Do not combine
+`compose.local.yaml` with the production `compose.yaml`. The detailed procedure
+and cleanup command are in [the media guide](docs/MEDIA.md#loopback-voice-test).
+Use the ordinary URL: `?forceTurn=1` is intentionally rejected in this profile.
+
 For an internet-facing instance, use the included non-root Compose/Caddy stack:
 
 ```bash
 cp .env.example .env
-# Set CAMPFIRE_DOMAIN, then prepare backups as described in the guide.
+# Set both DNS names, then prepare media and backup keys as described in the guide.
 docker compose build --pull campfire
 docker compose up -d
 ```
@@ -70,7 +90,8 @@ container and never mounts backups or their key into the web container.
 
 A community holds channels and members. The rail on the left switches between
 communities; **+** creates one and **↪** joins one with an invite code.
-Administrators can add channels with **+** in the sidebar header.
+Administrators can add text channels with **+** and voice channels with **♪**
+in the sidebar header.
 
 Every member of a community can read all of its channels. What a channel can
 restrict is *contributing* to it.
@@ -87,6 +108,19 @@ Administrators get a **⚙** beside the channel name. Each channel can set:
 
 The composer disables itself and says which rule applies, rather than letting
 someone type a message that will be refused.
+
+### Voice and screen sharing
+
+Select a voice channel, then start a call or open the current encrypted call
+link. The room key is generated in the browser and must be sent through a
+trusted private channel; it never reaches Campfire or LiveKit. The voice dock
+holds microphone/speaker selection, mute, deafen, bandwidth presets, optional
+shared audio, an always-visible screen-share stop button, and the call exit.
+
+Media E2EE is mandatory and unsupported browsers are refused rather than
+downgraded. Browser/OS audio limits, the eight-person ceiling, firewall ports,
+TURN verification, bandwidth budgets, and the exact security boundary are in
+[the media guide](docs/MEDIA.md).
 
 ### Roles and moderation
 
@@ -177,6 +211,12 @@ trusted network.
 | `CAMPFIRE_MAX_CONCURRENT_REQUESTS` | `64` | Connections/tasks accepted by the HTTP server |
 | `CAMPFIRE_REQUEST_WORKERS` | `64` | Bounded synchronous handler workers |
 | `CAMPFIRE_KEEPALIVE_TIMEOUT_SECONDS` | `5` | Idle HTTP keep-alive timeout |
+| `CAMPFIRE_MEDIA_URL` | unset | LiveKit WSS origin; separate hostname publicly, same loopback host allowed for development |
+| `CAMPFIRE_LIVEKIT_API_KEY` | unset | LiveKit signing-key identifier |
+| `CAMPFIRE_LIVEKIT_API_SECRET` | unset | Direct secret for native development |
+| `CAMPFIRE_LIVEKIT_API_SECRET_FILE` | unset | Raw secret or matching LiveKit key-file path |
+| `CAMPFIRE_MAX_VOICE_PARTICIPANTS` | `8` | Atomic application voice-room ceiling |
+| `CAMPFIRE_VOICE_LEASE_SECONDS` | `45` | Failed-client room-place expiry |
 
 ```bash
 CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 -m campfire serve
@@ -203,6 +243,7 @@ python3 -m unittest discover -s tests -v
 - [docs/SECURITY.md](docs/SECURITY.md) — implemented controls, known gaps, threat model
 - [docs/PRIVACY.md](docs/PRIVACY.md) — every piece of data stored and why
 - [docs/SELF-HOSTING.md](docs/SELF-HOSTING.md) — deployment, backups, configuration
+- [docs/MEDIA.md](docs/MEDIA.md) — media E2EE protocol, LiveKit/TURN, bandwidth and acceptance tests
 - [docs/API.md](docs/API.md) — the HTTP contract
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module boundaries and where things live
 - [docs/RELEASES.md](docs/RELEASES.md) — signed releases and automated scanning

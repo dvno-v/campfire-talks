@@ -7,29 +7,22 @@ Do not keep entering later commands in the hope that the problem fixes itself.
 
 ## What this guide builds
 
-The supported public setup has two programs, both managed by Docker Compose:
+The supported public setup has three programs, all managed by Docker Compose:
 
 ```text
-people on the internet
-          |
-          | HTTPS on port 443
-          v
-       Caddy
-   (certificates and HTTPS)
-          |
-          | private Docker network
-          v
-      Campfire
-   (the chat application)
-          |
-          +---- SQLite database
-          +---- uploaded images
+browser -- HTTPS/WSS :443 --> Caddy -- private --> Campfire
+             |                    `-- private --> LiveKit signaling
+             `-- UDP :7882 / TURN UDP :443 / ICE TCP :7881 --> LiveKit SFU
+
+Campfire --> SQLite database and uploaded images
+LiveKit  --> ephemeral encrypted-frame routing; no media volume
 ```
 
-Caddy is the only component exposed to the internet. It obtains and renews the
-HTTPS certificate and passes requests to Campfire over a private Docker
-network. Campfire stores its database and uploaded images in a persistent Docker
-volume, so replacing a container does not erase the chat.
+Caddy is the only HTTP component exposed to the internet. It obtains and renews
+both HTTPS certificates and passes application and LiveKit signaling requests
+over a private Docker network. LiveKit additionally exposes only the WebRTC
+ICE/TURN ports media requires. Campfire stores its database and uploaded images
+in a persistent Docker volume; LiveKit has no persistent media volume.
 
 The included configuration deliberately does **not** expose Campfire's port
 8000 to the host or the internet.
@@ -38,13 +31,13 @@ The included configuration deliberately does **not** expose Campfire's port
 
 These are the major stages. The detailed instructions below explain each one.
 
-1. Get a Linux server and a domain name.
-2. Point a DNS record such as `chat.example.net` at the server.
-3. Allow incoming TCP ports 80 and 443, and UDP port 443.
+1. Get a Linux server and two names under a domain.
+2. Point `chat.example.net` and `media.example.net` at the server.
+3. Allow TCP 80, 443, and 7881 plus UDP 443 and 7882.
 4. Install Docker Engine with the Docker Compose plugin.
 5. Put the Campfire repository on the server.
 6. Copy `.env.example` to `.env` and enter the real domain.
-7. Prepare private backup/key directories and a separately stored random key.
+7. Prepare private media and backup keys.
 8. Validate, build, and start the Compose stack.
 9. Check the readiness URL and create the first account.
 10. Create a backup and copy it away from the server.
@@ -59,8 +52,8 @@ internet-facing server.
 - **Host** or **server**: the Linux machine running Docker. A small VPS is fine.
 - **Domain**: the name people type, such as `chat.example.net`.
 - **DNS record**: the setting that connects that name to the server's IP address.
-- **Container**: an isolated process created from an image. Campfire and Caddy
-  each run in one.
+- **Container**: an isolated process created from an image. Campfire, Caddy,
+  and LiveKit each run in one.
 - **Image**: the packaged filesystem used to create a container. This is not a
   chat image upload.
 - **Volume**: persistent Docker-managed storage. It survives container
@@ -95,9 +88,8 @@ Docker commands with `sudo` or follow Docker's documented post-installation
 steps. Membership in the Docker group is effectively administrator access to
 the host. Do not solve the problem by making the Docker socket world-writable.
 
-This guide uses `chat.example.net` as a placeholder. Replace it with your real
-domain everywhere. Do not literally configure `chat.example.net` unless you own
-it.
+This guide uses `chat.example.net` and `media.example.net` as placeholders.
+Replace both with names you control.
 
 ## Step 1: point the domain at the server
 
@@ -112,6 +104,9 @@ Value:     YOUR_SERVER_IPV4_ADDRESS
 For example, an A record named `chat` under `example.net` creates
 `chat.example.net`.
 
+Create a second A record named `media` with the same address. If using IPv6,
+create matching correct AAAA records for both names.
+
 If the server has working public IPv6, also create an **AAAA record** containing
 that IPv6 address. If it does not, do not create an AAAA record. A wrong AAAA
 record can make the site fail for visitors whose devices prefer IPv6 even while
@@ -122,6 +117,7 @@ name resolves to:
 
 ```bash
 getent ahosts chat.example.net
+getent ahosts media.example.net
 ```
 
 You should see the server's public address. If you see an old or different
@@ -137,7 +133,9 @@ The following inbound traffic must reach the server:
 | TCP | 22 | SSH administration; the exact port may differ on your server |
 | TCP | 80 | Initial HTTPS certificate checks and HTTP-to-HTTPS redirects |
 | TCP | 443 | The Campfire website over HTTPS |
-| UDP | 443 | HTTP/3; recommended but Campfire still works without it |
+| UDP | 443 | LiveKit's embedded TURN/UDP relay |
+| TCP | 7881 | WebRTC ICE/TCP fallback when UDP cannot pass |
+| UDP | 7882 | Direct WebRTC media through LiveKit's UDP mux |
 
 Cloud providers often have a firewall in their web dashboard in addition to a
 firewall inside Linux. Check both. Keep SSH restricted to addresses you trust
@@ -190,11 +188,13 @@ Open it with an editor. `nano` is a beginner-friendly option if it is installed:
 nano .env
 ```
 
-Change the first value to your real domain. Do not include `https://`, a path,
-or a trailing slash. A valid file looks like this:
+Set both hostnames. Do not include a scheme, path, or trailing slash. The media
+name must differ from the application name. A valid file looks like this:
 
 ```dotenv
 CAMPFIRE_DOMAIN=chat.example.net
+CAMPFIRE_MEDIA_DOMAIN=media.example.net
+CAMPFIRE_LIVEKIT_API_KEY=campfire-media
 CAMPFIRE_MAX_STORAGE_BYTES=10737418240
 CAMPFIRE_STORAGE_WARNING_PERCENT=90
 ```
@@ -205,6 +205,10 @@ The settings mean:
 
 - `CAMPFIRE_DOMAIN` is the public hostname. Compose constructs the exact HTTPS
   origin from it.
+- `CAMPFIRE_MEDIA_DOMAIN` is the separate LiveKit signaling hostname. Both DNS
+  names may point to the same public address.
+- `CAMPFIRE_LIVEKIT_API_KEY` names the matching entry in the private LiveKit key
+  file prepared next. It is an identifier, not the secret itself.
 - `CAMPFIRE_MAX_STORAGE_BYTES` is the maximum space Campfire will allow uploaded
   images to consume. `10737418240` bytes is 10 GiB. It is an application safety
   ceiling, not extra disk space.
@@ -218,19 +222,22 @@ backups. As rough conversion helpers, 1 GiB is `1073741824` bytes and 5 GiB is
 The domain is not a password, but keeping `.env` private is a good habit because
 future versions may add sensitive settings.
 
-## Step 5: prepare backup storage and its separate key
+## Step 5: prepare media and backup keys
 
-The web container cannot see either of these paths. A networkless operator
-container mounts them only for an explicit backup, verification, or restore
-command. Both containers run as the deliberately unprivileged numeric user
-`10001`, so prepare private host directories and a raw 256-bit key for that
-user:
+The web container never sees `backups/` or `backup.key`; a networkless operator
+container mounts those only for an explicit backup, verification, or restore.
+Campfire and LiveKit do both need the separate LiveKit API mapping. All three
+application/operator containers use the deliberately unprivileged numeric user
+`10001`, so prepare the private paths for that user:
 
 ```bash
 sudo install -d -o 10001 -g 10001 -m 700 backups secrets
 sudo dd if=/dev/urandom of=secrets/backup.key bs=32 count=1 status=none
 sudo chown 10001:10001 secrets/backup.key
 sudo chmod 600 secrets/backup.key
+openssl rand -hex 32 | sed 's/^/campfire-media: /' | sudo tee secrets/livekit-keys.yaml >/dev/null
+sudo chown 10001:10001 secrets/livekit-keys.yaml
+sudo chmod 600 secrets/livekit-keys.yaml
 ```
 
 Keep another protected copy of `backup.key` somewhere separate from both the
@@ -238,15 +245,24 @@ server and its encrypted backups. Someone with the key can read every backup;
 without it, nobody can recover them. Both `backups/` and `secrets/` are ignored
 by Git. Never commit, email, or place the key alongside an off-server backup.
 
+The name before the colon in `livekit-keys.yaml` must exactly match
+`CAMPFIRE_LIVEKIT_API_KEY`. The 64 hex characters after it are the API secret;
+they let a holder mint LiveKit permissions, so protect this file like a server
+credential. Campfire and LiveKit mount the same one-line file, avoiding a
+duplicate secret or an inspectable secret environment variable. This API secret
+is not a call's media key: room keys are generated only in browsers and are not
+backed up.
+
 Check the numeric ownership:
 
 ```bash
 ls -ldn backups secrets
-ls -ln secrets/backup.key
+ls -ln secrets/backup.key secrets/livekit-keys.yaml
 ```
 
 The owner and group columns should say `10001`; directories should begin with
-`drwx------` and the key with `-rw-------`.
+`drwx------` and both files with `-rw-------`. Do not print either key as a
+diagnostic.
 
 ## Step 6: validate the configuration
 
@@ -279,7 +295,7 @@ The first build downloads layers and can take a few minutes. Later builds reuse
 cached layers. A successful build ends without an error and creates the local
 `campfire` image.
 
-Start Campfire and Caddy in the background:
+Start Campfire, Caddy, and LiveKit in the background:
 
 ```bash
 docker compose up -d
@@ -292,16 +308,17 @@ Now inspect them:
 docker compose ps
 ```
 
-You should see both `campfire` and `caddy`. Campfire may say `health: starting`
-for several seconds, followed by `healthy`. Caddy should be running and should
-show published ports 80 and 443. Campfire itself should not show a published
-host port.
+You should see `campfire`, `caddy`, and `livekit`. Campfire may say
+`health: starting` for several seconds, followed by `healthy`. Caddy publishes
+TCP 80/443. LiveKit publishes UDP 443/7882 and TCP 7881. Campfire port 8000 and
+LiveKit signaling port 7880 must not appear as host-published ports.
 
 If either service exits or remains unhealthy, inspect the application output:
 
 ```bash
 docker compose logs --tail=100 campfire
 docker compose logs --tail=100 caddy
+docker compose logs --tail=100 livekit
 ```
 
 Routine request and Caddy runtime logging are intentionally discarded, so the
@@ -337,6 +354,12 @@ https://chat.example.net
 Do not continue if the browser shows a certificate warning. A correct public
 deployment obtains a certificate trusted by the browser; clicking through a
 warning would hide a DNS, firewall, or proxy problem.
+
+Also confirm `https://media.example.net` reaches the LiveKit signaling edge. A
+plain browser page may be empty or return a small service response; it must have
+a trusted certificate and must not resolve to an unrelated host. Complete the
+direct-UDP and forced-TURN call checks in [MEDIA.md](MEDIA.md) after creating
+two accounts.
 
 ## Step 9: create the first account
 
@@ -646,8 +669,9 @@ configuration is safe
 
 The included stack gives Caddy the fixed private address `172.31.238.2` and
 configures Campfire to trust only that address. Caddy overwrites forwarded client
-address input before passing the request onward. Do not publish Campfire's port
-or broaden the trusted-proxy setting to `0.0.0.0/0`.
+address input before passing the request onward. Do not publish Campfire port
+8000 or LiveKit signaling port 7880, and do not broaden the trusted-proxy
+setting to `0.0.0.0/0`.
 
 ## What the container hardening does
 
@@ -664,10 +688,11 @@ The Campfire process runs as UID/GID `10001` rather than root. The Compose file:
 - gives a separate networkless operator profile the data, backup, and read-only
   key mounts only for explicit maintenance commands.
 
-Caddy alone publishes ports 80 and 443 and stores certificates in its own
-volume. Both image references are pinned so a rebuild cannot silently change to
-an unrelated `latest` image. Dependabot proposes pin changes for review, and the
-security workflow scans built images and source.
+Caddy publishes TCP 80/443 and stores certificates in its own volume. LiveKit
+publishes only UDP 443/7882 and TCP 7881 for TURN/ICE media. All external image
+references are pinned so a rebuild cannot silently change to an unrelated
+`latest` image. Dependabot proposes pin changes for review, and the security
+workflow scans built images and source.
 
 The supplied Caddyfile obtains HTTPS certificates, rejects request bodies above
 9 MB before forwarding, avoids buffering live event streams, and discards
@@ -677,7 +702,7 @@ information rather than a history of who visited which route.
 
 ## Troubleshooting
 
-### `CAMPFIRE_DOMAIN is missing a value`
+### A required domain is missing a value
 
 Compose did not find a usable `.env` value. From the repository directory run:
 
@@ -687,7 +712,8 @@ sed -n '1,20p' .env
 ```
 
 Confirm the file is beside `compose.yaml` and contains a line like
-`CAMPFIRE_DOMAIN=chat.example.net`.
+`CAMPFIRE_DOMAIN=chat.example.net` and a separate
+`CAMPFIRE_MEDIA_DOMAIN=media.example.net`.
 
 ### Docker cannot connect to the daemon
 
@@ -728,20 +754,20 @@ They should belong to numeric user and group `10001`, with directory mode `700`
 and key mode `600`. Repair them:
 
 ```bash
-sudo chown 10001:10001 backups secrets secrets/backup.key
+sudo chown 10001:10001 backups secrets secrets/backup.key secrets/livekit-keys.yaml
 sudo chmod 700 backups secrets
-sudo chmod 600 secrets/backup.key
+sudo chmod 600 secrets/backup.key secrets/livekit-keys.yaml
 ```
 
 ### HTTPS does not work
 
 Check these in order:
 
-1. Does the domain resolve to this server's public IP?
+1. Do both domains resolve to this server's public IP?
 2. Is there an incorrect AAAA record pointing somewhere else?
-3. Do provider and host firewalls allow TCP 80 and 443?
-4. Is another process already using ports 80 or 443?
-5. Are both Compose services running?
+3. Do provider and host firewalls allow the ports in Step 2?
+4. Is another process already using TCP 80/443 or UDP 443?
+5. Are all three Compose services running?
 
 Useful commands are:
 

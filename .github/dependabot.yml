@@ -1,5 +1,12 @@
 version: 2
 updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      browser-media:
+        patterns: ["*"]
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -14,4 +21,3 @@ updates:
     groups:
       actions:
         patterns: ["*"]
-

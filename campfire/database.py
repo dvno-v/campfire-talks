@@ -121,6 +121,7 @@ def initialize_database():
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM upload_reservations WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM webauthn_challenges WHERE expires_at<=?", (int(time.time()),))
+        database.execute("DELETE FROM voice_leases WHERE expires_at<=?", (int(time.time()),))
         database.commit()
     finally:
         database.close()

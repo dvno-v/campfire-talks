@@ -19,7 +19,8 @@ server.py                 compatibility process entry point
                 ├── realtime.py  in-process event fan-out and presence
                 └── services/    authorized domain queries and workflows
 
-static/                   dependency-free browser client
+frontend/                 reviewed LiveKit/E2EE browser source
+static/                   browser client and reproducibly built media bundles
 tests/                    owning-module unit tests
 docs/                     security, privacy, API, operations, and roadmap
 ```
@@ -91,8 +92,11 @@ For a handful of friends, splitting chat, identity, storage, and presence into
 network services would add secrets, failure modes, logs, and deployment burden
 without improving privacy. Module boundaries give us testability now and allow
 later extraction only where operations require it. Voice/screen media is the
-exception because WebRTC routing is a specialized workload and will run in a
-separate self-hosted SFU.
+exception because WebRTC routing is a specialized workload. The pinned LiveKit
+SFU is a separate, resource-bounded container; Caddy proxies only its signaling
+endpoint while ICE and TURN media ports reach it directly. `services/media.py`
+issues short one-room grants and owns atomic participant leases. The browser
+alone owns the room key and encoded-frame E2EE.
 
 ## Domain services
 
@@ -106,6 +110,7 @@ the privilege ladder and owns membership removal and ban workflows,
 `services/retention.py` owns scheduled deletion of expired history,
 `services/storage.py` owns disk accounting and the upload ceiling,
 `services/passkeys.py` owns one-time WebAuthn ceremonies and credential state,
+`services/media.py` owns voice leases and narrow LiveKit token generation,
 `services/messages.py` decides who may edit or delete, and
 `services/notifications.py` decides what each account has read and wants told.
 The HTTP layer keeps the decision about which status code reveals what. Those

@@ -145,9 +145,11 @@ about two seconds; that browser returns to sign-in when it detects the loss.
 Returns everything stored about the caller as one JSON document, served with a
 `Content-Disposition` filename so a browser saves it. It carries the account
 row without its password hash, session creation and expiry times without their
-digests, passkey names/timestamps without credential material, community memberships and roles, every message the caller wrote with
-its community and channel name, uploaded image metadata, read markers,
-notification preferences, invites created, and bans received. It never contains
+digests, passkey names/timestamps without credential material, community
+memberships and roles, every message the caller wrote with its community and
+channel name, uploaded image metadata, read markers, active voice-lease
+metadata without the lease token digest, notification preferences, invites
+created, and bans received. It never contains
 another account's messages or anything the caller could not already see. The
 `format` field is `campfire.account-export.v1`.
 
@@ -192,9 +194,12 @@ caller's own reading state:
 | `unread` | messages newer than the read marker, excluding the caller's own |
 | `last_read_message_id` | highest message id the caller has marked read, or `0` |
 | `notify` | `all`, `none`, or `null` when the account default applies |
+| `kind` | `text` or `voice`; unread fields are meaningful only for text |
 
 Alongside the communities, `notifications.default_mode` gives the account-wide
-default (`all` unless it has been changed).
+default (`all` unless it has been changed). `media.enabled` tells the client
+whether LiveKit is configured and `media.max_participants` carries the voice
+ceiling; no media credential or key is returned by bootstrap.
 
 ## Communities and channels
 
@@ -320,11 +325,50 @@ Creates an owned community with a `general` channel.
 ### `POST /api/channels`
 
 ```json
-{"community_id": 1, "name": "memes"}
+{"community_id": 1, "name": "memes", "kind": "text"}
 ```
 
 Community owners and administrators may create a channel. Members of that
 community are told over `/api/events`, so the channel appears without a reload.
+`kind` is `text` by default or `voice`. Message and upload endpoints answer
+`409` for voice channels.
+
+## Voice media
+
+### `POST /api/channels/{channel_id}/voice/token`
+
+```json
+{"key_fingerprint": "64 lowercase SHA-256 hex characters"}
+```
+
+Current community members only, and only for a voice channel while media is
+configured. Under one immediate transaction this removes expired leases,
+requires the occupied room's existing key fingerprint, and enforces the
+eight-participant ceiling. The response contains a two-minute one-room LiveKit
+JWT, public WSS URL, opaque lease, expiry, room name, and participant ceiling.
+The grant can publish only microphone, screen video, and screen audio; it cannot
+publish data or administer/record the room. The media key itself must never be
+sent to this endpoint. Each account may mint at most 12 join grants per minute.
+
+### `POST /api/channels/{channel_id}/voice/heartbeat`
+
+```json
+{"lease": "opaque value returned with the token"}
+```
+
+Renews the caller's exact lease for 45 seconds after rechecking that its
+membership and voice channel still exist. An expired, replaced, malformed, or
+revoked lease receives `403`.
+
+### `DELETE /api/channels/{channel_id}/voice/lease`
+
+```json
+{"lease": "opaque value returned with the token"}
+```
+
+Deletes only the caller's matching lease. It is idempotent at the HTTP level:
+the response's `ok` says whether a row was removed. Network loss is safe because
+the row expires quickly.
 
 ## Invitations
 

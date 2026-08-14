@@ -20,6 +20,7 @@ function requestOptions(options) { const copy=structuredClone(options); copy.cha
 function registrationCredential(credential) { return {id:credential.id,rawId:bytesBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,response:{clientDataJSON:bytesBase64url(credential.response.clientDataJSON),attestationObject:bytesBase64url(credential.response.attestationObject),transports:credential.response.getTransports?.()||[]}}; }
 function authenticationCredential(credential) { return {id:credential.id,rawId:bytesBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,response:{clientDataJSON:bytesBase64url(credential.response.clientDataJSON),authenticatorData:bytesBase64url(credential.response.authenticatorData),signature:bytesBase64url(credential.response.signature),userHandle:bytesBase64url(credential.response.userHandle)}}; }
 function showAuth() {
+  void window.CampfireVoice?.leave();
   state.eventSource?.close(); state.eventSource = null; state.user = null;
   setAuthMode(false);
   setNavOpen(false); $('#members-panel').classList.remove('open');
@@ -32,6 +33,7 @@ async function enterApp() {
   const data = await api('/api/bootstrap');
   state.user = data.user; state.communities = data.communities;
   state.defaultMode = data.notifications?.default_mode || 'all';
+  window.CampfireVoice?.configure(data.media);
   state.unread.clear();
   data.communities.forEach(community => community.channels.forEach(channel => rememberChannelState(channel.id, channel)));
   renderNotificationBell();
@@ -74,7 +76,14 @@ async function enterApp() {
     if (document.querySelector(`[data-message-id="${Number(event.id)}"]`)) return;
     markUnreadBoundary(event); appendMessage(event); readActiveChannel();
   };
-  selectCommunity(state.communities[0]);
+  const invitedVoice = window.CampfireVoice?.consumeInvite();
+  const invitedCommunity = invitedVoice && state.communities.find(community =>
+    community.channels.some(channel => channel.id === Number(invitedVoice) && channel.kind === 'voice'));
+  selectCommunity(invitedCommunity || state.communities[0]);
+  if (invitedCommunity) {
+    const channel = invitedCommunity.channels.find(entry => entry.id === Number(invitedVoice));
+    window.CampfireVoice.open(channel);
+  }
 }
 
 function renderCommunities() {
@@ -90,7 +99,7 @@ function selectCommunity(community) {
   state.members = []; renderMembers();
   renderCommunityControls();
   renderChannels();
-  selectChannel(community?.channels[0]);
+  selectChannel(community?.channels.find(channel => (channel.kind || 'text') === 'text'));
   if (community) loadMembers(community.id);
 }
 
@@ -105,16 +114,25 @@ function renderCommunityControls() {
 
 function renderChannels() {
   const community = state.community;
-  $('#channels').innerHTML = (community?.channels || []).map(c => {
+  const all = community?.channels || [];
+  const textChannels = all.filter(channel => (channel.kind || 'text') === 'text');
+  const voiceChannels = all.filter(channel => channel.kind === 'voice');
+  const channelButton = c => {
     const unread = channelState(c.id).unread, muted = notifyMode(c.id) === 'none';
     // A muted channel still shows that it moved, but never with a count that
     // asks to be cleared.
     const badge = unread && !muted ? `<span class="channel-badge">${unread > 99 ? '99+' : unread}</span>` : '';
-    return `<button class="channel ${c.id === state.channel?.id ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}" data-id="${c.id}">${escapeHTML(c.name)}${badge}</button>`;
-  }).join('');
+    return `<button class="channel ${c.kind === 'voice' ? 'voice' : ''} ${c.id === state.channel?.id ? 'active' : ''} ${unread ? 'unread' : ''} ${muted ? 'muted' : ''}" data-id="${c.id}">${escapeHTML(c.name)}${badge}</button>`;
+  };
+  $('#channels').innerHTML = textChannels.map(channelButton).join('')
+    + (voiceChannels.length ? `<div class="channel-heading voice-heading">VOICE CHANNELS</div>${voiceChannels.map(channelButton).join('')}` : '');
   // Picking a channel is what the drawer was opened for, so it gets out of the
   // way. Picking a community does not: the channel list is the next choice.
-  document.querySelectorAll('.channel').forEach(button => button.onclick = () => { selectChannel(community.channels.find(c => c.id === +button.dataset.id)); closeNavOnDrawer(); });
+  document.querySelectorAll('.channel').forEach(button => button.onclick = () => {
+    const channel = community.channels.find(c => c.id === +button.dataset.id);
+    if (channel.kind === 'voice') window.CampfireVoice?.open(channel); else selectChannel(channel);
+    closeNavOnDrawer();
+  });
 }
 
 function channelState(channelId) { return state.unread.get(Number(channelId)) || { unread: 0, last_read_message_id: 0, notify: null }; }
@@ -309,6 +327,7 @@ function renderMembers() {
   const manages = ['owner', 'administrator'].includes(currentCommunityRole());
   $('#invite-friend').classList.toggle('hidden', !manages);
   $('#add-channel').classList.toggle('hidden', !manages);
+  $('#add-voice-channel').classList.toggle('hidden', !manages);
   $('#manage-bans').classList.toggle('hidden', roleRank(currentCommunityRole()) < roleRank('moderator'));
   renderCommunityControls();
   if (!state.members.length) { $('#member-list').innerHTML = '<p class="member-empty">Loading members…</p>'; return; }
@@ -363,7 +382,10 @@ function applyMemberUpdated(event) {
 }
 
 function applyMemberRemoved(event) {
-  if (Number(event.user_id) === state.user?.id) return enterApp();
+  if (Number(event.user_id) === state.user?.id) {
+    void window.CampfireVoice?.leave('Your current voice call ended because community access changed.');
+    return enterApp();
+  }
   if (event.community_id !== state.community?.id) return;
   state.members = state.members.filter(member => member.id !== Number(event.user_id));
   state.online.delete(Number(event.user_id));
@@ -408,6 +430,7 @@ function applyChannelCreated(event) {
   const community = state.communities.find(c => c.id === event.community_id);
   if (!community || community.channels.some(channel => channel.id === event.id)) return;
   community.channels.push({ id: event.id, name: event.name,
+    kind: event.kind || 'text',
     post_min_role: event.post_min_role, slow_mode_seconds: event.slow_mode_seconds,
     uploads_allowed: event.uploads_allowed });
   if (community.id === state.community?.id) renderChannels();
@@ -439,7 +462,7 @@ function rememberChannelRules(updated) {
   const community = state.communities.find(entry => entry.id === Number(updated.community_id));
   const channel = community?.channels.find(entry => entry.id === Number(updated.id));
   const rules = { post_min_role: updated.post_min_role, slow_mode_seconds: updated.slow_mode_seconds,
-                  uploads_allowed: updated.uploads_allowed };
+                  uploads_allowed: updated.uploads_allowed, kind: updated.kind || 'text' };
   if (channel) Object.assign(channel, rules);
   if (state.channel?.id === Number(updated.id)) { Object.assign(state.channel, rules); applyChannelRules(); }
 }
@@ -760,6 +783,7 @@ $('#close-bans').onclick = () => $('#ban-dialog').close();
 async function loadBans() { const communityId=state.community?.id; if(!communityId)return; $('#ban-list').innerHTML='<p class="member-empty">Loading bans…</p>'; try { const data=await api(`/api/communities/${communityId}/bans`); if(state.community?.id!==communityId)return; $('#ban-list').innerHTML=data.bans.length?data.bans.map(ban=>`<article class="invite-row"><div><strong>${escapeHTML(ban.username)}</strong><span>Banned by ${escapeHTML(ban.banned_by_username||'a former moderator')} · ${new Date(ban.created_at).toLocaleString()}</span></div>${canModerateRole(ban.role_at_ban)?`<button type="button" data-unban-member="${Number(ban.user_id)}">Unban</button>`:''}</article>`).join(''):'<p class="member-empty">No banned accounts.</p>'; document.querySelectorAll('[data-unban-member]').forEach(button=>button.onclick=()=>unbanMember(Number(button.dataset.unbanMember))); } catch(error){ $('#ban-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
 async function unbanMember(userId) { if(!confirm('Allow this account to join again?'))return; try { await api(`/api/communities/${state.community.id}/bans/${userId}`,{method:'DELETE'}); await loadBans(); } catch(error){alert(error.message);} }
 $('#add-channel').onclick = async () => { if(!state.community)return; const name=prompt('Channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); selectChannel(channel); } catch(error){alert(error.message);} };
+$('#add-voice-channel').onclick = async () => { if(!state.community)return; const name=prompt('Voice channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,kind:'voice',community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); window.CampfireVoice?.open(channel); } catch(error){alert(error.message);} };
 
 $('#notify-settings').onclick = () => { closeNavOnDrawer(); $('#notify-dialog').showModal(); renderNotificationSettings(); };
 $('#close-notify').onclick = () => $('#notify-dialog').close();
@@ -771,7 +795,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function renderNotificationSettings() {
   $('#notify-default').value = state.defaultMode;
   renderNotificationPermission(); renderNotificationBell();
-  const channels = state.community?.channels || [];
+  const channels = (state.community?.channels || []).filter(channel => (channel.kind || 'text') === 'text');
   $('#notify-channels').innerHTML = channels.length ? channels.map(channel => `<article class="invite-row"><div><strong>#${escapeHTML(channel.name)}</strong><span>${channelState(channel.id).unread} unread</span></div><select data-channel-notify="${Number(channel.id)}" aria-label="Notifications for ${escapeHTML(channel.name)}"><option value="default">Use the default</option><option value="all">Notify me</option><option value="none">Mute</option></select></article>`).join('') : '<p class="member-empty">No channels yet.</p>';
   document.querySelectorAll('[data-channel-notify]').forEach(select => {
     select.value = channelState(select.dataset.channelNotify).notify || 'default';

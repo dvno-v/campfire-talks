@@ -22,9 +22,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .config import ACCESS_LOGS, DB_PATH, HOST, MAX_EVENT_STREAMS, MAX_EVENT_STREAMS_PER_USER
-from .config import MAX_STORAGE_BYTES
+from .config import LIVEKIT_API_KEY, LIVEKIT_API_SECRET, MAX_STORAGE_BYTES
 from .config import MAX_UPLOAD_BYTES, PORT, PUBLIC_ORIGIN, RETENTION_SWEEP_SECONDS
-from .config import SECURE_COOKIES, STATIC_DIR, STORAGE_WARNING_PERCENT
+from .config import MAX_VOICE_PARTICIPANTS, MEDIA_URL, SECURE_COOKIES, STATIC_DIR
+from .config import STORAGE_WARNING_PERCENT, VOICE_LEASE_SECONDS
 from .config import TRUSTED_PROXIES, UPLOAD_DIR
 from .config import validate_configuration
 from .database import connect, initialize_database, message_from_row, schema_version, utc_now
@@ -32,7 +33,7 @@ from .instance_lock import operation_lock, server_lock
 from .migrations import LATEST_SCHEMA_VERSION
 from .realtime import BROKER
 from .security import AUTH_IP_LIMITER, AUTH_LIMITER, DUMMY_PASSWORD_HASH
-from .security import PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
+from .security import MEDIA_TOKEN_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
 from .services.accounts import change_password as change_account_password
@@ -48,6 +49,7 @@ from .services.communities import set_member_role, shares_community
 from .services.communities import unban_member as unban_community_member
 from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+from .services.media import claim_lease, issue_join_token, release_lease, renew_lease
 from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
 from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
 from .services.passkeys import PasskeyError, authenticate_passkey, authentication_options
@@ -79,6 +81,9 @@ _STATIC_MANIFEST = (
     ("/notifications.css", "notifications.css"),
     ("/shell.css", "shell.css"),
     ("/styles.css", "styles.css"),
+    ("/voice.css", "voice.css"),
+    ("/voice.js", "voice.js"),
+    ("/livekit-e2ee-worker.js", "livekit-e2ee-worker.js"),
 )
 
 
@@ -96,12 +101,17 @@ _STYLESHEET_PATHS = frozenset(
     request_path for request_path, filename in _STATIC_MANIFEST
     if filename.endswith(".css")
 )
+_SCRIPT_PATHS = frozenset(
+    request_path for request_path, filename in _STATIC_MANIFEST
+    if filename.endswith(".js")
+)
 
 
 def response_security_headers():
+    connect_sources = "'self'" + (f" {MEDIA_URL}" if MEDIA_URL else "")
     headers = [
-        ("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"),
-        ("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self), geolocation=()"),
+        ("Content-Security-Policy", f"default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src {connect_sources}; font-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"),
+        ("Permissions-Policy", "camera=(), microphone=(self), display-capture=(self), geolocation=()"),
         ("Referrer-Policy", "no-referrer"),
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
@@ -295,6 +305,10 @@ class App(BaseHTTPRequestHandler):
                 return routes[path]()
             if path.startswith("/api/channels/") and path.endswith("/messages"):
                 return self.create_message(path)
+            if path.startswith("/api/channels/") and path.endswith("/voice/token"):
+                return self.voice_token(path)
+            if path.startswith("/api/channels/") and path.endswith("/voice/heartbeat"):
+                return self.voice_heartbeat(path)
             if path.startswith("/api/channels/") and path.endswith("/uploads"):
                 return self.upload_attachment(path)
             if path.startswith("/api/channels/") and path.endswith("/read"):
@@ -325,6 +339,8 @@ class App(BaseHTTPRequestHandler):
                 return self.revoke_session(path)
             if path.startswith("/api/passkeys/"):
                 return self.delete_passkey(path)
+            if path.startswith("/api/channels/") and path.endswith("/voice/lease"):
+                return self.voice_leave(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -732,7 +748,7 @@ class App(BaseHTTPRequestHandler):
               SELECT c.id community_id,c.name community_name,
                 c.message_retention_days,c.attachment_retention_days,
                 ch.id channel_id,ch.name channel_name,
-                ch.post_min_role,ch.slow_mode_seconds,ch.uploads_allowed,
+                ch.kind,ch.post_min_role,ch.slow_mode_seconds,ch.uploads_allowed,
                 CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END community_role
               FROM communities c JOIN memberships m ON m.community_id=c.id
               JOIN channels ch ON ch.community_id=c.id WHERE m.user_id=?
@@ -752,7 +768,9 @@ class App(BaseHTTPRequestHandler):
                                          | settings_payload(row)
                                          | self.channel_state_payload(states.get(row["channel_id"])))
         self.send_json({"user": user, "communities": list(communities.values()),
-                        "notifications": {"default_mode": default_mode}})
+                        "notifications": {"default_mode": default_mode},
+                        "media": {"enabled": bool(MEDIA_URL),
+                                  "max_participants": MAX_VOICE_PARTICIPANTS}})
 
     def channel_state_payload(self, state):
         """The unread/notification fields a client needs to render one channel.
@@ -855,7 +873,9 @@ class App(BaseHTTPRequestHandler):
             channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                     (community_id, "general", utc_now())).lastrowid
         self.send_json({"id": community_id, "name": name, "role": "owner",
-                        "channels": [{"id": channel_id, "name": "general"}]}, HTTPStatus.CREATED)
+                        "channels": [{"id": channel_id, "name": "general", "kind": "text",
+                                      "post_min_role": "member", "slow_mode_seconds": 0,
+                                      "uploads_allowed": True}]}, HTTPStatus.CREATED)
 
     def community_members(self, path):
         user = self.require_user()
@@ -1041,6 +1061,7 @@ class App(BaseHTTPRequestHandler):
             return
         body = self.json_body()
         name = re.sub(r"[^a-z0-9-]", "-", str(body.get("name", "")).lower().strip()).strip("-")
+        kind = str(body.get("kind", "text"))
         try:
             community_id = int(body.get("community_id"))
         except (TypeError, ValueError):
@@ -1050,12 +1071,16 @@ class App(BaseHTTPRequestHandler):
                 return self.error(HTTPStatus.FORBIDDEN, "Only community administrators can add channels")
             if not 2 <= len(name) <= 30:
                 return self.error(HTTPStatus.BAD_REQUEST, "Channel name must be 2–30 characters")
+            if kind not in {"text", "voice"}:
+                return self.error(HTTPStatus.BAD_REQUEST, "Channel kind must be 'text' or 'voice'")
             try:
-                channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
-                                        (community_id, name, utc_now())).lastrowid
+                channel_id = db.execute("""INSERT INTO channels(community_id,name,kind,created_at)
+                                         VALUES(?,?,?,?)""",
+                                        (community_id, name, kind, utc_now())).lastrowid
             except sqlite3.IntegrityError:
                 return self.error(HTTPStatus.CONFLICT, "That channel already exists")
-        created = {"id": channel_id, "name": name, "post_min_role": "member",
+        created = {"id": channel_id, "community_id": community_id, "name": name, "kind": kind,
+                   "post_min_role": "member",
                    "slow_mode_seconds": 0, "uploads_allowed": True}
         BROKER.publish({"type": "channel.created", "community_id": community_id} | created)
         self.send_json(created, HTTPStatus.CREATED)
@@ -1124,7 +1149,7 @@ class App(BaseHTTPRequestHandler):
                        HTTPStatus.CREATED)
 
     def member_channel(self, db, channel_id, user_id):
-        return db.execute("""SELECT ch.id FROM channels ch JOIN memberships m ON m.community_id=ch.community_id
+        return db.execute("""SELECT ch.id,ch.kind FROM channels ch JOIN memberships m ON m.community_id=ch.community_id
                              WHERE ch.id=? AND m.user_id=?""", (channel_id, user_id)).fetchone()
 
     def list_messages(self, path):
@@ -1141,8 +1166,11 @@ class App(BaseHTTPRequestHandler):
         except ValueError:
             after = 0
         with connect() as db:
-            if not self.member_channel(db, channel_id, user["id"]):
+            channel = self.member_channel(db, channel_id, user["id"])
+            if not channel:
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
+            if channel["kind"] != "text":
+                return self.error(HTTPStatus.CONFLICT, "Voice channels do not contain messages")
             rows = db.execute("""SELECT m.id,m.channel_id,m.body,m.created_at,m.edited_at,m.attachment_id,
               u.id author_id,u.username,a.original_name,a.mime_type,a.byte_size
               FROM messages m JOIN users u ON u.id=m.author_id
@@ -1195,6 +1223,8 @@ class App(BaseHTTPRequestHandler):
         elif status == "slow_mode":
             self.error(HTTPStatus.TOO_MANY_REQUESTS,
                        f"Slow mode is on. Try again in {detail} second{'' if detail == 1 else 's'}")
+        elif status == "voice_channel":
+            self.error(HTTPStatus.CONFLICT, "Voice channels do not accept messages or images")
         else:
             return False
         return True
@@ -1224,6 +1254,86 @@ class App(BaseHTTPRequestHandler):
                               f"and slow mode 0–{MAX_SLOW_MODE_SECONDS} seconds")
         BROKER.publish({"type": "channel.updated", **updated})
         self.send_json(updated)
+
+    def voice_channel_id(self, path):
+        match = re.fullmatch(r"/api/channels/(\d+)/voice/(?:token|heartbeat|lease)", path)
+        if not match:
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid voice channel")
+        return int(match.group(1))
+
+    def voice_token(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        if not (MEDIA_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET):
+            return self.error(HTTPStatus.SERVICE_UNAVAILABLE,
+                              "Voice is not configured on this instance")
+        if not MEDIA_TOKEN_LIMITER.allow(f"user:{user['id']}"):
+            return self.error(HTTPStatus.TOO_MANY_REQUESTS,
+                              "Voice join limit reached. Wait a minute and try again")
+        channel_id = self.voice_channel_id(path)
+        if channel_id is None:
+            return
+        fingerprint = str(self.json_body().get("key_fingerprint", ""))
+        with connect() as database:
+            status, lease = claim_lease(
+                database, channel_id, user["id"], fingerprint,
+                MAX_VOICE_PARTICIPANTS, VOICE_LEASE_SECONDS)
+        if status == "invalid_key":
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid media key fingerprint")
+        if status == "forbidden":
+            return self.error(HTTPStatus.FORBIDDEN, "No access to this voice channel")
+        if status == "not_voice":
+            return self.error(HTTPStatus.CONFLICT, "That is not a voice channel")
+        if status == "key_mismatch":
+            # Two very different situations used to share one message that told
+            # people to open a link nobody had given them. Say which one it is:
+            # a running call needs its link, a lapsing one only needs a moment.
+            if lease["live"]:
+                others = ("Somebody else is" if lease["live"] == 1
+                          else f"{lease['live']} other people are")
+                return self.error(HTTPStatus.CONFLICT,
+                                  f"{others} already in this call with a different encryption "
+                                  "key. Ask them for the current call link and open it, or wait "
+                                  "for the call to end before starting a new one")
+            return self.error(HTTPStatus.CONFLICT,
+                              "A call that has just ended is still releasing this channel. "
+                              f"Try again in {max(1, lease['retry_after'])} seconds")
+        if status == "full":
+            return self.error(HTTPStatus.CONFLICT,
+                              f"This voice channel is limited to {MAX_VOICE_PARTICIPANTS} participants")
+        room = f"campfire-{channel_id}"
+        token = issue_join_token(LIVEKIT_API_KEY, LIVEKIT_API_SECRET, room,
+                                 user["id"], user["username"], fingerprint)
+        self.send_json(lease | {"url": MEDIA_URL, "token": token, "room": room,
+                                "max_participants": MAX_VOICE_PARTICIPANTS})
+
+    def voice_heartbeat(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        channel_id = self.voice_channel_id(path)
+        if channel_id is None:
+            return
+        token = str(self.json_body().get("lease", ""))
+        with connect() as database:
+            renewed = renew_lease(database, channel_id, user["id"], token,
+                                  VOICE_LEASE_SECONDS)
+        if not renewed:
+            return self.error(HTTPStatus.FORBIDDEN, "Voice lease expired or access was revoked")
+        self.send_json({"ok": True})
+
+    def voice_leave(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        channel_id = self.voice_channel_id(path)
+        if channel_id is None:
+            return
+        token = str(self.json_body().get("lease", ""))
+        with connect() as database:
+            released = release_lease(database, channel_id, user["id"], token)
+        self.send_json({"ok": released})
 
     def message_id_from(self, path):
         try:
@@ -1516,8 +1626,8 @@ class App(BaseHTTPRequestHandler):
                        for character in decoded_path)
                 or any(segment in {".", ".."} for segment in decoded_path.split("/"))):
             return self.error(HTTPStatus.NOT_FOUND, "Not found")
-        if path == "/app.js":
-            content = _STATIC_RESPONSES["/app.js"]
+        if path in _SCRIPT_PATHS:
+            content = _STATIC_RESPONSES[path]
             content_type = "application/javascript; charset=utf-8"
         elif path in _STYLESHEET_PATHS:
             content = _STATIC_RESPONSES[path]

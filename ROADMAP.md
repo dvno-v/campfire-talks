@@ -73,15 +73,17 @@ back from the documentation without losing messages or files.
 
 ## Milestone 4 — Voice and screen sharing
 
-- Self-hosted LiveKit proof of concept and documented firewall/TURN requirements
-- Voice channels with device selection, mute/deafen, and connection indicators
-- User-initiated screen/window/tab sharing with an always-visible stop control
+Status: implemented; deployment field verification required
+
+- [x] Self-hosted LiveKit proof of concept and documented firewall/TURN requirements
+- [x] Voice channels with device selection, mute/deafen, and connection indicators
+- [x] User-initiated screen/window/tab sharing with an always-visible stop control
   that ends video and audio together
-- Optional capture of shared-application audio, published as a track separate
+- [x] Optional capture of shared-application audio, published as a track separate
   from the microphone, with capture-side processing disabled
-- Media quality controls suitable for home upload bandwidth
-- E2EE for media with an explicit room-key distribution design
-- No recording, transcription, or media telemetry by default
+- [x] Media quality controls suitable for home upload bandwidth
+- [x] E2EE for media with an explicit room-key distribution design
+- [x] No recording, transcription, or media telemetry by default
 
 Shared-application audio depends on the browser and operating system, not on
 Campfire. Full desktop audio is available on Chromium-based browsers on
@@ -100,6 +102,11 @@ Exit criteria: a small group can sustain voice and one screen share through both
 direct UDP and TURN fallback within a measured upstream budget, a share with
 audio survives the same path on a supported browser, and the documented
 encryption claims are verified.
+
+The implementation and reproducible static checks are complete. The direct-UDP,
+forced-TURN, browser-audio, and WAN-budget measurements are necessarily
+deployment-specific and remain an operator acceptance step; the exact procedure
+and evidence to record are in [docs/MEDIA.md](docs/MEDIA.md).
 
 ## Milestone 5 — Friend-group polish
 

@@ -32,3 +32,17 @@
 		}
 	}
 }
+
+{$CAMPFIRE_MEDIA_DOMAIN} {
+	log {
+		output discard
+	}
+
+	reverse_proxy livekit:7880 {
+		fail_duration 30s
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 30s
+		}
+	}
+}

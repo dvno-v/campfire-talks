@@ -1,4 +1,8 @@
 import os
+import base64
+import hashlib
+import hmac
+import json
 import sqlite3
 import stat
 import tempfile
@@ -15,7 +19,7 @@ from unittest.mock import patch
 temporary = tempfile.TemporaryDirectory()
 os.environ["CAMPFIRE_DB"] = str(Path(temporary.name) / "test.db")
 
-from campfire import database, realtime, security, uploads
+from campfire import config, database, realtime, security, uploads
 from campfire.services.accounts import change_password, delete_account, deletion_plan
 from campfire.services.accounts import export_account, list_sessions, revoke_session
 from campfire.services.channels import channel_context, may_post, slow_mode_remaining
@@ -24,6 +28,8 @@ from campfire.services.communities import community_role, has_role, is_banned, l
 from campfire.services.communities import list_community_bans, list_community_members, remove_member
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
+from campfire.services.media import UNCONFIRMED_LEASE_SECONDS
+from campfire.services.media import claim_lease, issue_join_token, release_lease, renew_lease
 from campfire.services.retention import purge_expired, set_retention
 from campfire.services.storage import begin_reserved_upload_write, capacity_warnings, exceeds_limit
 from campfire.services.storage import filesystems_have_space, release_upload, reserve_upload
@@ -133,17 +139,20 @@ class CampfireTests(unittest.TestCase):
         self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages",
                          "invitations", "attachments", "channel_reads", "notification_preferences",
                          "channel_notifications", "community_bans", "schema_migrations",
-                         "upload_reservations", "passkeys", "webauthn_challenges"} <= names)
+                         "upload_reservations", "passkeys", "webauthn_challenges",
+                         "voice_leases"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
             session_columns = {row[1] for row in db.execute("PRAGMA table_info(sessions)")}
+            channel_columns = {row[1] for row in db.execute("PRAGMA table_info(channels)")}
         self.assertIn("attachment_id", message_columns)
         self.assertIn("role", membership_columns)
         self.assertIn("created_at", session_columns)
         self.assertIn("id", session_columns)
+        self.assertIn("kind", channel_columns)
         with database.connect() as db:
-            self.assertEqual(database.schema_version(db), 3)
+            self.assertEqual(database.schema_version(db), 4)
 
     def test_existing_memberships_are_migrated_to_member_role(self):
         original_path = database.DB_PATH
@@ -422,6 +431,129 @@ class CampfireTests(unittest.TestCase):
         channel_id = db.execute("INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
                                 (community_id, "general", database.utc_now())).lastrowid
         return actors, community_id, channel_id
+
+    def test_voice_grants_are_signed_narrow_and_short_lived(self):
+        token = issue_join_token(
+            "media-key", "s" * 32, "campfire-42", 7, "alice", "a" * 64,
+            timestamp=1_000)
+        header, claims, signature = token.split(".")
+        expected = hmac.new(
+            ("s" * 32).encode(), f"{header}.{claims}".encode(), hashlib.sha256).digest()
+        actual = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        self.assertTrue(hmac.compare_digest(actual, expected))
+        decoded = json.loads(base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4)))
+        self.assertEqual((decoded["iss"], decoded["sub"], decoded["exp"]),
+                         ("media-key", "user-7", 1_120))
+        self.assertEqual(decoded["video"]["room"], "campfire-42")
+        self.assertFalse(decoded["video"]["canPublishData"])
+        self.assertEqual(set(decoded["video"]["canPublishSources"]),
+                         {"microphone", "screen_share", "screen_share_audio"})
+        self.assertEqual(json.loads(decoded["metadata"])["keyFingerprint"], "a" * 64)
+
+    def test_voice_leases_enforce_the_limit_atomically_and_store_only_digests(self):
+        with database.connect() as db:
+            actors, _, channel_id = self.channel_fixture(db, "voice_atomic")
+            db.execute("UPDATE channels SET kind='voice' WHERE id=?", (channel_id,))
+
+        barrier = threading.Barrier(len(actors))
+        results = []
+        failures = []
+
+        def reserve(user_id):
+            try:
+                with database.connect() as connection:
+                    barrier.wait()
+                    results.append((user_id, claim_lease(
+                        connection, channel_id, user_id, "a" * 64, 2, 90,
+                        timestamp=1_000)))
+            except Exception as failure:  # pragma: no cover - surfaced below
+                failures.append(failure)
+
+        threads = [threading.Thread(target=reserve, args=(user_id,))
+                   for user_id in actors.values()]
+        for worker in threads:
+            worker.start()
+        for worker in threads:
+            worker.join()
+
+        self.assertFalse(failures)
+        self.assertEqual([result[1][0] for result in results].count("ok"), 2)
+        self.assertEqual([result[1][0] for result in results].count("full"), 2)
+        granted = [(user_id, result[1]) for user_id, result in results if result[0] == "ok"]
+        with database.connect() as db:
+            stored = db.execute(
+                "SELECT user_id,token_hash,key_fingerprint FROM voice_leases WHERE channel_id=?",
+                (channel_id,)).fetchall()
+        self.assertEqual(len(stored), 2)
+        raw_leases = {payload["lease"] for _, payload in granted}
+        self.assertTrue(raw_leases.isdisjoint({row["token_hash"] for row in stored}))
+        self.assertEqual({hashlib.sha256(raw.encode()).hexdigest() for raw in raw_leases},
+                         {row["token_hash"] for row in stored})
+
+        user_id, lease = granted[0]
+        with database.connect() as db:
+            self.assertFalse(renew_lease(db, channel_id, user_id, "wrong", 90,
+                                         timestamp=1_010))
+            self.assertTrue(renew_lease(db, channel_id, user_id, lease["lease"], 90,
+                                        timestamp=1_010))
+            self.assertTrue(release_lease(db, channel_id, user_id, lease["lease"]))
+            status, replacement = claim_lease(
+                db, channel_id, user_id, "b" * 64, 2, 90, timestamp=1_091)
+        self.assertEqual(status, "ok")
+        self.assertIsNotNone(replacement)
+
+    def test_an_abandoned_voice_place_lapses_long_before_a_heartbeated_one(self):
+        """A crashed browser must not hold a room's key for a whole lease.
+
+        The refusal also has to say which situation it is: asking somebody for
+        a call link is the fix for an occupied room and useless for one that is
+        merely still letting go of a call nobody is in.
+        """
+        with database.connect() as db:
+            actors, _, channel_id = self.channel_fixture(db, "voice_settling")
+            db.execute("UPDATE channels SET kind='voice' WHERE id=?", (channel_id,))
+            holder, newcomer = actors["owner"], actors["member"]
+
+            lease_seconds = config.VOICE_LEASE_SECONDS
+            self.assertGreater(lease_seconds, UNCONFIRMED_LEASE_SECONDS,
+                               "a renewed place must outlast an unconfirmed one")
+
+            status, place = claim_lease(db, channel_id, holder, "a" * 64, 8,
+                                        lease_seconds, timestamp=1_000)
+            self.assertEqual(status, "ok")
+            self.assertEqual(place["lease_expires_at"],
+                             1_000 + UNCONFIRMED_LEASE_SECONDS,
+                             "an unheartbeated place is held only briefly")
+
+            # Nobody has heartbeated yet, so the room reads as settling rather
+            # than as somebody else's call.
+            status, refusal = claim_lease(db, channel_id, newcomer, "b" * 64, 8,
+                                          lease_seconds, timestamp=1_005)
+            self.assertEqual(status, "key_mismatch")
+            self.assertEqual((refusal["participants"], refusal["live"]), (1, 0))
+            self.assertEqual(refusal["retry_after"], UNCONFIRMED_LEASE_SECONDS - 5)
+
+            # One heartbeat promotes the place to the full lease, and now the
+            # room genuinely is occupied by somebody reachable for a link.
+            self.assertTrue(renew_lease(db, channel_id, holder, place["lease"],
+                                        lease_seconds, timestamp=1_010))
+            status, refusal = claim_lease(db, channel_id, newcomer, "b" * 64, 8,
+                                          lease_seconds, timestamp=1_015)
+            self.assertEqual(status, "key_mismatch")
+            self.assertEqual((refusal["participants"], refusal["live"]), (1, 1))
+
+            # A holder that stops heartbeating decays back to settling well
+            # before its place lapses, then frees the room outright.
+            settled = 1_010 + lease_seconds - UNCONFIRMED_LEASE_SECONDS
+            status, refusal = claim_lease(db, channel_id, newcomer, "b" * 64, 8,
+                                          lease_seconds, timestamp=settled)
+            self.assertEqual((status, refusal["live"]), ("key_mismatch", 0))
+            status, replacement = claim_lease(db, channel_id, newcomer, "b" * 64, 8,
+                                              lease_seconds,
+                                              timestamp=1_011 + lease_seconds)
+            self.assertEqual(status, "ok")
+            self.assertEqual(replacement["participants"], 1,
+                             "the lapsed place must not be counted or keep its key")
 
     def test_a_channel_can_restrict_posting_to_a_role(self):
         with database.connect() as db:

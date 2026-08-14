@@ -1,0 +1,30 @@
+port: 7880
+bind_addresses:
+  - 127.0.0.1
+key_file: /run/secrets/livekit-keys.yaml
+
+logging:
+  level: info
+  pion_level: warn
+  json: false
+
+room:
+  empty_timeout: 300
+  departure_timeout: 20
+  max_participants: 8
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/vp8
+
+# This profile is deliberately for browsers on the same machine only. The
+# public profile discovers and advertises a WAN address; doing that in a
+# loopback test produces a signaling connection but no reachable ICE pair.
+rtc:
+  node_ip: 127.0.0.1
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  enable_loopback_candidate: true
+
+turn:
+  enabled: false
