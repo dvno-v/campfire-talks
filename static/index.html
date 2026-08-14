@@ -28,6 +28,7 @@
         <p id="auth-error" class="error"></p>
         <button id="auth-submit" class="primary" type="submit">Sign in</button>
       </form>
+      <button id="passkey-login" class="export-button" type="button">Sign in with a passkey</button>
       <button id="auth-toggle" class="text-button">New here? Create an account</button>
     </section>
   </main>
@@ -106,7 +107,7 @@
   </dialog>
   <dialog id="account-dialog" class="invite-dialog account-dialog">
     <section>
-      <header><div><p class="eyebrow">ACCOUNT SECURITY</p><h2>Password and sessions</h2></div><button id="close-account" type="button" aria-label="Close account security">×</button></header>
+      <header><div><p class="eyebrow">ACCOUNT SECURITY</p><h2>Sign-in and sessions</h2></div><button id="close-account" type="button" aria-label="Close account security">×</button></header>
       <form id="password-form" class="password-form">
         <label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label>
         <label>New password<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label>
@@ -114,6 +115,14 @@
         <p id="password-status" class="account-status" aria-live="polite"></p>
         <button class="primary" type="submit">Change password</button>
       </form>
+      <div class="session-heading"><h3>Passkeys</h3><p class="muted">Use your device, password manager, or security key for phishing-resistant sign-in. Your current password remains the recovery method.</p></div>
+      <form id="passkey-form" class="password-form passkey-form">
+        <label>Passkey name<input id="passkey-name" maxlength="64" placeholder="Laptop or security key" required></label>
+        <label>Confirm current password<input id="passkey-password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <p id="passkey-status" class="account-status" aria-live="polite"></p>
+        <button class="primary" type="submit">Add passkey</button>
+      </form>
+      <div id="passkey-list" class="invite-list session-list"></div>
       <div class="session-heading"><h3>Active sessions</h3><p class="muted">Campfire stores only when each session began and expires—not your device, IP address, or location.</p></div>
       <div id="session-list" class="invite-list session-list"></div>
       <div class="session-heading"><h3>Your data</h3><p class="muted">A single JSON file holding your account, communities, messages, image details, and preferences. It is plain text and depends on nothing Campfire hosts.</p></div>

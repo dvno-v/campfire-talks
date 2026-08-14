@@ -44,14 +44,15 @@ These are the major stages. The detailed instructions below explain each one.
 4. Install Docker Engine with the Docker Compose plugin.
 5. Put the Campfire repository on the server.
 6. Copy `.env.example` to `.env` and enter the real domain.
-7. Prepare the backup directory with the correct permissions.
+7. Prepare private backup/key directories and a separately stored random key.
 8. Validate, build, and start the Compose stack.
 9. Check the readiness URL and create the first account.
 10. Create a backup and copy it away from the server.
 
-For a private test on the same computer, you can skip all of this and run
-`python3 -m campfire serve`, then open <http://localhost:8000>. The rest of this
-guide is for an internet-facing server.
+For a private test on the same computer, you can skip all of this, install
+`requirements.txt` in a virtual environment, and run `python -m campfire
+serve`, then open <http://localhost:8000>. The rest of this guide is for an
+internet-facing server.
 
 ## A few words used in this guide
 
@@ -217,30 +218,35 @@ backups. As rough conversion helpers, 1 GiB is `1073741824` bytes and 5 GiB is
 The domain is not a password, but keeping `.env` private is a good habit because
 future versions may add sensitive settings.
 
-## Step 5: prepare the backup directory
+## Step 5: prepare backup storage and its separate key
 
-The application container runs as the deliberately unprivileged numeric user
-`10001`. Create the host directory that will be mounted at `/backups` and give
-that user permission to write there:
+The web container cannot see either of these paths. A networkless operator
+container mounts them only for an explicit backup, verification, or restore
+command. Both containers run as the deliberately unprivileged numeric user
+`10001`, so prepare private host directories and a raw 256-bit key for that
+user:
 
 ```bash
-mkdir -p backups
-sudo chown 10001:10001 backups
-chmod 700 backups
+sudo install -d -o 10001 -g 10001 -m 700 backups secrets
+sudo dd if=/dev/urandom of=secrets/backup.key bs=32 count=1 status=none
+sudo chown 10001:10001 secrets/backup.key
+sudo chmod 600 secrets/backup.key
 ```
 
-Why do this before starting? If Docker creates the directory itself, it may be
-owned by root. Campfire would run normally but fail later when you first try to
-make a backup.
+Keep another protected copy of `backup.key` somewhere separate from both the
+server and its encrypted backups. Someone with the key can read every backup;
+without it, nobody can recover them. Both `backups/` and `secrets/` are ignored
+by Git. Never commit, email, or place the key alongside an off-server backup.
 
 Check the numeric ownership:
 
 ```bash
-ls -ldn backups
+ls -ldn backups secrets
+ls -ln secrets/backup.key
 ```
 
-The owner and group columns should both say `10001`. The permission text should
-start with `drwx------`.
+The owner and group columns should say `10001`; directories should begin with
+`drwx------` and the key with `-rw-------`.
 
 ## Step 6: validate the configuration
 
@@ -342,56 +348,62 @@ Choose the first username and password carefully because that account owns the
 initial community. Once signed in, use the invite control in the channel
 sidebar to create a time-limited invite for each friend.
 
+In **Account security**, add a passkey from a device, password manager, or
+hardware security key and test signing out and back in. WebAuthn depends on the
+exact HTTPS domain, so a passkey registered here is deliberately not valid for
+a different hostname. Keep the password protected: it remains the recovery and
+passkey-management credential.
+
 At this point the server is usable. The next step—making a tested backup—is what
 turns a working experiment into something you can recover.
 
-## Step 10: create and verify the first backup
+## Step 10: create and verify the first encrypted backup
 
-A Campfire backup is a directory containing a matching database, uploaded
-images, and a manifest of hashes. Use a unique name for every backup. Dates in
-`YYYY-MM-DD` order sort naturally:
-
-```bash
-docker compose exec -T campfire \
-  python -m campfire backup /backups/2026-08-11-first-working-deploy
-```
-
-Replace the date with today's date. The destination must not already exist; this
-prevents accidentally overwriting a known backup.
-
-Success prints one line of JSON containing `"ok": true`. Now verify the result
-independently:
+Use a unique filename for every backup. Dates in `YYYY-MM-DD` order sort
+naturally. The operator profile has no network and is the only container that
+can see `/backups` and `/run/secrets`:
 
 ```bash
-docker compose exec -T campfire \
-  python -m campfire verify-backup /backups/2026-08-11-first-working-deploy
+docker compose --profile operations run --rm --no-deps campfire-ops \
+  backup-encrypted /backups/2026-08-14-first-working-deploy.campfire-backup \
+  --key-file /run/secrets/backup.key
 ```
 
-Again, success prints JSON containing `"ok": true`. Verification checks the
-database, every file, every recorded size and SHA-256 hash, and the relationship
-between database attachment records and uploaded files.
+Replace the date with today's date. The destination must not already exist,
+preventing accidental overwrite. Success prints one JSON line containing
+`"ok": true`. Authenticate the AES-256-GCM file and then verify its internal
+manifest, database, and every referenced image:
 
-The `backups` directory is still on the same server. It protects against a bad
-upgrade or accidental data replacement, but not against total disk or server
-loss. Copy completed backup directories to encrypted storage on another
-machine or provider. Limit access: a backup contains private messages, images,
-usernames, password hashes, and session/invite digests.
+```bash
+docker compose --profile operations run --rm --no-deps campfire-ops \
+  verify-encrypted-backup \
+  /backups/2026-08-14-first-working-deploy.campfire-backup \
+  --key-file /run/secrets/backup.key
+```
+
+Plaintext snapshot staging exists only transiently on the already-plaintext
+`campfire-data` volume and is removed. The host backup directory receives only
+the atomically published encrypted file. Verification authenticates the whole
+archive before safe extraction, then checks SQLite integrity, schema, every
+recorded size and SHA-256 hash, and the database/upload relationship.
+
+The backup is still on the same server. It protects against a bad upgrade or
+accidental data replacement, but not total server loss. Copy completed
+`.campfire-backup` files to another machine or provider, while keeping the key
+in a different protected location.
 
 For example, run the following from your own computer—not from the server—and
 replace the login, server address, and absolute repository path:
 
 ```bash
-scp -r \
-  operator@YOUR_SERVER:/absolute/path/to/campfire-talks/backups/2026-08-11-first-working-deploy \
+scp \
+  operator@YOUR_SERVER:/absolute/path/to/campfire-talks/backups/2026-08-14-first-working-deploy.campfire-backup \
   ./
 ```
 
-SSH encrypts this transfer, but the resulting local files are only as protected
-as your computer's disk and account. Prefer an encrypted local disk or an
-encrypted backup destination. After copying, verify that off-server copy before
-depending on it. If Docker is available on the destination, the simplest method
-is to place it temporarily under the deployment's `backups/` directory and run
-the same `verify-backup` command against it.
+SSH protects the transfer and the file remains encrypted at rest. After copying,
+verify the off-server copy with a separately supplied key before depending on
+it. Do not copy `backup.key` into the same folder or provider account.
 
 ## Everyday command cheat sheet
 
@@ -429,14 +441,16 @@ maintenance; that requests deletion of the persistent Campfire and Caddy data.
 
 ## Where the data actually lives
 
-The Compose deployment uses three named volumes and one host directory:
+The Compose deployment uses three named volumes and two private host
+directories:
 
 | Storage | Contents | Must be backed up? |
 | --- | --- | --- |
 | `campfire-data` volume | SQLite database and uploaded images | Yes, through Campfire's backup command |
 | `caddy-data` volume | HTTPS certificates and Caddy state | Usually no; Caddy can obtain certificates again |
 | `caddy-config` volume | Caddy runtime configuration state | Usually no; it is recreated from the checked-in Caddyfile |
-| local `backups/` directory | Completed Campfire snapshot directories | Yes; copy these off the server |
+| local `backups/` directory | Authenticated encrypted Campfire backup files | Yes; copy these off the server |
+| local `secrets/` directory | The separate raw backup key | Yes, but never beside the backups |
 
 The exact Docker-generated volume name normally includes the repository
 directory or Compose project name. You do not need to find or copy the volume
@@ -455,20 +469,21 @@ copies exactly the uploads referenced by that snapshot. New messages pause
 during this operation, so a very large instance should back up during a quiet
 period. Existing readers and live event streams can continue.
 
-The completed backup has exactly this shape:
+Inside the encrypted archive the authenticated snapshot has exactly this
+shape:
 
 ```text
-2026-08-11-before-upgrade/
-├── campfire.db
-├── manifest.json
-└── uploads/
-    └── ...stored image files...
+campfire.db
+manifest.json
+uploads/
+└── ...stored image files...
 ```
 
-Campfire first builds it under a hidden incomplete name and only publishes the
-requested directory after every copy succeeds. A missing upload, bad size,
-unsafe filename, or write error aborts the operation instead of publishing a
-backup that merely looks complete.
+Campfire builds the plaintext snapshot transiently on the data volume, streams
+it into AES-256-GCM, and only publishes the requested ciphertext file after
+every copy and filesystem sync succeeds. A missing upload, bad size, unsafe
+filename, or write error aborts instead of publishing a backup that merely
+looks complete.
 
 A sensible small-instance policy is:
 
@@ -486,12 +501,13 @@ A backup you have never verified or restored in a rehearsal is only a hope.
 Restore **replaces the current database and uploads**. It is intentionally an
 offline action and requires the explicit `--confirm` flag.
 
-Before restoring, make sure you selected the correct backup directory. Verify
+Before restoring, make sure you selected the correct backup file. Verify
 it one more time while the current server is still running:
 
 ```bash
-docker compose exec -T campfire \
-  python -m campfire verify-backup /backups/2026-08-11-before-upgrade
+docker compose --profile operations run --rm --no-deps campfire-ops \
+  verify-encrypted-backup /backups/2026-08-14-before-upgrade.campfire-backup \
+  --key-file /run/secrets/backup.key
 ```
 
 Then stop Campfire, restore, migrate if necessary, and start the stack:
@@ -499,10 +515,11 @@ Then stop Campfire, restore, migrate if necessary, and start the stack:
 ```bash
 docker compose stop campfire
 
-docker compose run --rm --no-deps campfire \
-  restore /backups/2026-08-11-before-upgrade --confirm
+docker compose --profile operations run --rm --no-deps campfire-ops \
+  restore-encrypted /backups/2026-08-14-before-upgrade.campfire-backup \
+  --key-file /run/secrets/backup.key --confirm
 
-docker compose run --rm --no-deps campfire migrate
+docker compose --profile operations run --rm --no-deps campfire-ops migrate
 
 docker compose up -d
 
@@ -553,7 +570,7 @@ The core commands after preparing and verifying the backup are:
 docker compose config --quiet
 docker compose build --pull campfire
 docker compose stop campfire
-docker compose run --rm --no-deps campfire migrate
+docker compose --profile operations run --rm --no-deps campfire-ops migrate
 docker compose up -d
 curl --fail --show-error https://chat.example.net/readyz
 ```
@@ -639,9 +656,13 @@ The Campfire process runs as UID/GID `10001` rather than root. The Compose file:
 - drops every Linux capability from Campfire;
 - sets `no-new-privileges`;
 - makes the application filesystem read-only;
-- provides a small temporary filesystem;
-- gives the application one writable data volume and the backup bind mount; and
-- exposes it only on the private Compose network.
+- provides a small temporary filesystem and CPU, memory, PID, request,
+  connection, thread, and file-descriptor ceilings;
+- gives the web application only its writable data volume, never the backup
+  directory or backup key;
+- places the application network behind an `internal` boundary; and
+- gives a separate networkless operator profile the data, backup, and read-only
+  key mounts only for explicit maintenance commands.
 
 Caddy alone publishes ports 80 and 443 and stores certificates in its own
 volume. Both image references are pinned so a rebuild cannot silently change to
@@ -696,17 +717,20 @@ or a database created by a newer release.
 
 ### The backup command says permission denied
 
-Check the host backup directory:
+Check the host backup and key paths:
 
 ```bash
-ls -ldn backups
+ls -ldn backups secrets
+ls -ln secrets/backup.key
 ```
 
-It should belong to numeric user and group `10001` with mode `700`. Repair it:
+They should belong to numeric user and group `10001`, with directory mode `700`
+and key mode `600`. Repair them:
 
 ```bash
-sudo chown 10001:10001 backups
-chmod 700 backups
+sudo chown 10001:10001 backups secrets secrets/backup.key
+sudo chmod 700 backups secrets
+sudo chmod 600 secrets/backup.key
 ```
 
 ### HTTPS does not work
@@ -748,7 +772,7 @@ that migration offline:
 
 ```bash
 docker compose stop campfire
-docker compose run --rm --no-deps campfire migrate
+docker compose --profile operations run --rm --no-deps campfire-ops migrate
 docker compose up -d
 ```
 
@@ -757,8 +781,8 @@ shortcut. Take a verified backup before any repair that changes data.
 
 ### A backup destination already exists
 
-This is intentional overwrite protection. Choose a new unique directory name.
-Do not delete the old directory until you have confirmed what it contains and
+This is intentional overwrite protection. Choose a new unique backup filename.
+Do not delete the old file until you have confirmed what it contains and
 whether your retention policy still needs it.
 
 ### Restore refuses because Campfire is running
@@ -767,8 +791,9 @@ Stop only the application, then retry:
 
 ```bash
 docker compose stop campfire
-docker compose run --rm --no-deps campfire \
-  restore /backups/YOUR_BACKUP_NAME --confirm
+docker compose --profile operations run --rm --no-deps campfire-ops \
+  restore-encrypted /backups/YOUR_BACKUP.campfire-backup \
+  --key-file /run/secrets/backup.key --confirm
 ```
 
 If it still reports a lock, check that no other backup, migration, restore, or
@@ -776,19 +801,21 @@ temporary Campfire container is running with `docker compose ps --all`.
 
 ## Native private deployment
 
-For a loopback-only machine or a trusted VPN environment, the dependency-free
-Python process remains available:
+For a loopback-only machine or a trusted VPN environment, the Python process
+can run directly from a virtual environment:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 CAMPFIRE_DB=/srv/campfire/campfire.db \
 CAMPFIRE_UPLOAD_DIR=/srv/campfire/uploads \
-python3 -m campfire serve
+.venv/bin/python -m campfire serve
 ```
 
 By default it listens only on `127.0.0.1:8000`. Use the same `check-config`,
-`migrate`, `backup`, `verify-backup`, and offline `restore --confirm`
-subcommands. Keep the database, uploads, and backups readable only by the
-service account.
+`migrate`, directory backup/restore, and encrypted backup/restore subcommands.
+Keep the database, uploads, backups, and encryption key readable only by the
+service account, and retain the key separately.
 
 A public native deployment is an advanced configuration. It still needs a
 maintained HTTPS reverse proxy and every fail-closed setting described above.

@@ -1,5 +1,13 @@
 {
 	admin off
+	servers {
+		timeouts {
+			read_header 5s
+			read_body 2m
+			idle 30s
+		}
+		max_header_size 32KB
+	}
 	log {
 		output discard
 	}
@@ -15,7 +23,12 @@
 	}
 
 	reverse_proxy campfire:8000 {
-		flush_interval -1
 		header_up X-Forwarded-For {remote_host}
+		fail_duration 30s
+		unhealthy_request_count 64
+		transport http {
+			dial_timeout 2s
+			response_header_timeout 30s
+		}
 	}
 }

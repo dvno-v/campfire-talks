@@ -10,6 +10,8 @@ RUN addgroup -S -g 10001 campfire \
     && chown campfire:campfire /data /backups
 
 WORKDIR /app
+COPY --chown=root:root requirements.txt ./
+RUN pip install --no-cache-dir --disable-pip-version-check -r requirements.txt
 COPY --chown=root:root campfire/ campfire/
 COPY --chown=root:root static/ static/
 COPY --chown=root:root server.py README.md ROADMAP.md ./
@@ -25,7 +27,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CAMPFIRE_UPLOAD_DIR=/data/uploads
 
 EXPOSE 8000
-VOLUME ["/data", "/backups"]
+VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3).read()"]
 

@@ -1,11 +1,12 @@
 # Campfire
 
 Campfire is a self-hosted, Discord-style chat server for a small group of people
-who already know each other. It is deliberately dependency-free: Python serves
-the API and the static client, SQLite stores everything, and browsers receive
-live messages over Server-Sent Events. No build step, no package manager, no
-third-party application service. The supported public deployment adds a local
-HTTPS reverse proxy; Campfire itself still makes no outbound service calls.
+who already know each other. Python serves the API and static client, SQLite
+stores everything, and browsers receive live messages over Server-Sent Events.
+There is no frontend build or hosted application dependency. A small pinned
+Python dependency set provides the production HTTP and WebAuthn layers. The
+supported public deployment adds a local HTTPS reverse proxy; Campfire itself
+still makes no outbound service calls.
 
 It is built around a few refusals — no advertising, no analytics, no telemetry,
 no public discovery, no remote assets — and around collecting only the data a
@@ -18,9 +19,10 @@ images, roles, moderation, retention and data export all work and are covered by
 tests.
 
 **Reproducible self-hosting is complete.** Versioned transactional migrations,
-verified database/upload snapshots, offline restore, fail-closed public
-configuration, a non-root Docker image, and a minimal Caddy Compose deployment
-are covered by the [self-hosting guide](docs/SELF-HOSTING.md).
+authenticated encrypted database/upload snapshots, offline restore, passkeys,
+fail-closed public configuration, a bounded production HTTP server, and an
+isolated non-root Caddy Compose deployment are covered by the
+[self-hosting guide](docs/SELF-HOSTING.md).
 
 Milestones 1–3 of the [roadmap](ROADMAP.md) are done. What is missing is voice,
 direct messages, reactions, replies, and search.
@@ -28,7 +30,9 @@ direct messages, reactions, replies, and search.
 ## Run it
 
 ```bash
-python3 -m campfire serve
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m campfire serve
 ```
 
 Open <http://localhost:8000>.
@@ -55,9 +59,10 @@ header, and create a 24-hour code. Codes are shown once, at creation, because
 only their digest is stored. Revoking a code invalidates every copy of it
 immediately.
 
-Data lands in `data/campfire.db` and `data/uploads/`. Snapshot and verify both
-together with `python3 -m campfire backup BACKUP_DIR`; copying one path alone is
-not a consistent backup.
+Data lands in `data/campfire.db` and `data/uploads/`. Snapshot both together;
+copying one path alone is not a consistent backup. The supplied Compose runbook
+creates one authenticated AES-256-GCM file through its networkless operator
+container and never mounts backups or their key into the web container.
 
 ## Using it
 
@@ -121,9 +126,11 @@ on the server, so muting never tells the server what you are willing to be told.
 
 ### Your account and your data
 
-**⚙** in the sidebar footer opens account security: change your password, see
-every active session with when it began, and sign any of them out remotely — the
-revoked browser's live connection closes within a couple of seconds.
+**⚙** in the sidebar footer opens account security: add password-manager,
+device, or hardware-key passkeys; change your password; see every active session
+with when it began; and sign any of them out remotely. The revoked browser's
+live connection closes within a couple of seconds. The password remains the
+account recovery method.
 
 The same screen downloads everything Campfire holds about you as one JSON file,
 and deletes your account. Deletion erases your messages and images everywhere,
@@ -165,8 +172,11 @@ trusted network.
 | `CAMPFIRE_ORIGIN` | unset | Public origin, no trailing slash |
 | `CAMPFIRE_TRUSTED_PROXIES` | unset | Proxies whose forwarded addresses to believe |
 | `CAMPFIRE_ACCESS_LOG` | `0` | Request logging; leave off unless diagnosing |
-| `CAMPFIRE_MAX_EVENT_STREAMS` | `200` | Concurrent live connections allowed |
-| `CAMPFIRE_MAX_EVENT_STREAMS_PER_USER` | `8` | Live connections per account |
+| `CAMPFIRE_MAX_EVENT_STREAMS` | `32` | Concurrent live connections allowed |
+| `CAMPFIRE_MAX_EVENT_STREAMS_PER_USER` | `4` | Live connections per account |
+| `CAMPFIRE_MAX_CONCURRENT_REQUESTS` | `64` | Connections/tasks accepted by the HTTP server |
+| `CAMPFIRE_REQUEST_WORKERS` | `64` | Bounded synchronous handler workers |
+| `CAMPFIRE_KEEPALIVE_TIMEOUT_SECONDS` | `5` | Idle HTTP keep-alive timeout |
 
 ```bash
 CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 -m campfire serve
@@ -177,8 +187,9 @@ CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 -m campfire serve
 non-loopback listener fails before migration or binding unless HTTPS origin,
 secure cookies, trusted proxy, and a storage ceiling are all configured.
 
-The operator CLI also provides `check-config`, `migrate`, `backup`,
-`verify-backup`, and offline `restore --confirm` commands.
+The operator CLI also provides `check-config`, `migrate`, plaintext directory
+backup/restore commands for native use, and `backup-encrypted`,
+`verify-encrypted-backup`, and offline `restore-encrypted --confirm` commands.
 
 ## Test it
 

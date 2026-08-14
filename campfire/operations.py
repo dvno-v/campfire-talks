@@ -8,8 +8,13 @@ import os
 import secrets
 import shutil
 import sqlite3
+import tarfile
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from . import __version__
 from .database import schema_version, utc_now
@@ -20,10 +25,21 @@ BACKUP_FORMAT = "campfire.backup.v1"
 DATABASE_NAME = "campfire.db"
 UPLOADS_NAME = "uploads"
 MANIFEST_NAME = "manifest.json"
+ENCRYPTED_BACKUP_MAGIC = b"CAMPFIRE-ENCRYPTED-BACKUP-v1\n"
+BACKUP_KEY_BYTES = 32
+GCM_NONCE_BYTES = 12
+GCM_TAG_BYTES = 16
 
 
 class BackupError(RuntimeError):
     """A backup or restore could not be completed safely."""
+
+
+def _resolve_without_symlink(value, label):
+    path = Path(value)
+    if path.is_symlink():
+        raise BackupError(f"{label} cannot be a symbolic link")
+    return path.resolve()
 
 
 def _safe_storage_name(name):
@@ -56,6 +72,212 @@ def _fsync_directory(path):
         os.close(descriptor)
 
 
+def _read_backup_key(key_file):
+    key_file = _resolve_without_symlink(key_file, "Backup key")
+    if not key_file.is_file():
+        raise BackupError("Backup key must be a regular file")
+    try:
+        if key_file.stat().st_size != BACKUP_KEY_BYTES:
+            raise BackupError("Backup key must contain exactly 32 random bytes")
+        key = key_file.read_bytes()
+    except OSError as failure:
+        raise BackupError("Backup key cannot be read") from failure
+    if len(key) != BACKUP_KEY_BYTES:
+        raise BackupError("Backup key must contain exactly 32 random bytes")
+    return key
+
+
+class _EncryptingWriter:
+    """Minimal streaming file interface consumed by tarfile's pipe mode."""
+
+    def __init__(self, destination, encryptor):
+        self.destination = destination
+        self.encryptor = encryptor
+
+    def write(self, content):
+        encrypted = self.encryptor.update(content)
+        if encrypted:
+            self.destination.write(encrypted)
+        return len(content)
+
+    def flush(self):
+        self.destination.flush()
+
+
+def _private_tar_metadata(member):
+    member.uid = member.gid = 0
+    member.uname = member.gname = ""
+    member.mtime = 0
+    member.mode = 0o700 if member.isdir() else 0o600
+    return member
+
+
+def _encrypt_backup_directory(source, destination, key):
+    nonce = secrets.token_bytes(GCM_NONCE_BYTES)
+    temporary = destination.parent / f".{destination.name}.incomplete-{secrets.token_hex(8)}"
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(ENCRYPTED_BACKUP_MAGIC)
+            output.write(nonce)
+            encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+            encryptor.authenticate_additional_data(ENCRYPTED_BACKUP_MAGIC)
+            encrypted_output = _EncryptingWriter(output, encryptor)
+            with tarfile.open(fileobj=encrypted_output, mode="w|",
+                              format=tarfile.PAX_FORMAT) as archive:
+                for name in (MANIFEST_NAME, DATABASE_NAME, UPLOADS_NAME):
+                    archive.add(source / name, arcname=name, recursive=True,
+                                filter=_private_tar_metadata)
+            final = encryptor.finalize()
+            if final:
+                output.write(final)
+            output.write(encryptor.tag)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(destination.parent)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def create_encrypted_backup(destination, key_file, database_path, upload_dir):
+    """Create an atomic, authenticated backup without publishing plaintext."""
+    destination = _resolve_without_symlink(destination, "Backup destination")
+    database_path = _resolve_without_symlink(database_path, "Database")
+    upload_dir = _resolve_without_symlink(upload_dir, "Upload directory")
+    if destination.exists():
+        raise BackupError(f"Backup destination already exists: {destination}")
+    if destination == upload_dir or upload_dir in destination.parents:
+        raise BackupError("Backup destination cannot be inside the live upload directory")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    key = _read_backup_key(key_file)
+
+    # The only plaintext staging remains beside the already-plaintext live
+    # database. The backup volume receives only an authenticated ciphertext.
+    staging_root = Path(tempfile.mkdtemp(
+        prefix=".encrypted-backup-staging-", dir=database_path.parent))
+    snapshot = staging_root / "snapshot"
+    try:
+        manifest = create_backup(snapshot, database_path, upload_dir)
+        _encrypt_backup_directory(snapshot, destination, key)
+        return manifest
+    finally:
+        shutil.rmtree(staging_root, ignore_errors=True)
+
+
+def _decrypt_to_tar(source, destination, key):
+    minimum = len(ENCRYPTED_BACKUP_MAGIC) + GCM_NONCE_BYTES + GCM_TAG_BYTES
+    if not source.is_file() or source.is_symlink():
+        raise BackupError("Encrypted backup must be a regular file")
+    try:
+        size = source.stat().st_size
+        if size <= minimum:
+            raise BackupError("Encrypted backup is truncated")
+        with source.open("rb") as incoming, destination.open("xb") as plaintext:
+            if incoming.read(len(ENCRYPTED_BACKUP_MAGIC)) != ENCRYPTED_BACKUP_MAGIC:
+                raise BackupError("Unsupported encrypted backup format")
+            nonce = incoming.read(GCM_NONCE_BYTES)
+            incoming.seek(-GCM_TAG_BYTES, os.SEEK_END)
+            tag = incoming.read(GCM_TAG_BYTES)
+            remaining = size - minimum
+            incoming.seek(len(ENCRYPTED_BACKUP_MAGIC) + GCM_NONCE_BYTES)
+            decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+            decryptor.authenticate_additional_data(ENCRYPTED_BACKUP_MAGIC)
+            while remaining:
+                chunk = incoming.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise BackupError("Encrypted backup is truncated")
+                remaining -= len(chunk)
+                plaintext.write(decryptor.update(chunk))
+            plaintext.write(decryptor.finalize())
+            plaintext.flush()
+            os.fsync(plaintext.fileno())
+        os.chmod(destination, 0o600)
+    except InvalidTag as failure:
+        destination.unlink(missing_ok=True)
+        raise BackupError("Encrypted backup authentication failed") from failure
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def _extract_authenticated_tar(archive_path, destination):
+    destination.mkdir(mode=0o700)
+    seen = set()
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            for member in archive:
+                name = member.name.rstrip("/")
+                if name in seen:
+                    raise BackupError("Encrypted backup archive contains duplicate entries")
+                seen.add(name)
+                if member.isdir():
+                    if name != UPLOADS_NAME:
+                        raise BackupError("Encrypted backup archive contains an unsafe directory")
+                    (destination / UPLOADS_NAME).mkdir(mode=0o700, exist_ok=True)
+                    continue
+                path = Path(name)
+                valid_file = (member.isreg() and (
+                    name in {MANIFEST_NAME, DATABASE_NAME}
+                    or (len(path.parts) == 2 and path.parts[0] == UPLOADS_NAME
+                        and _safe_storage_name(path.parts[1]))))
+                if not valid_file:
+                    raise BackupError("Encrypted backup archive contains an unsafe entry")
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise BackupError("Encrypted backup archive contains an unreadable entry")
+                target = destination.joinpath(*path.parts)
+                target.parent.mkdir(mode=0o700, exist_ok=True)
+                with extracted, target.open("xb") as output:
+                    shutil.copyfileobj(extracted, output, length=1024 * 1024)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.chmod(target, 0o600)
+    except (OSError, tarfile.TarError) as failure:
+        raise BackupError("Encrypted backup archive is invalid") from failure
+    if not {MANIFEST_NAME, DATABASE_NAME, UPLOADS_NAME} <= seen:
+        raise BackupError("Encrypted backup archive is incomplete")
+
+
+@contextmanager
+def decrypted_backup(source, key_file, working_directory):
+    """Yield an authenticated, verified plaintext snapshot, then remove it."""
+    source = _resolve_without_symlink(source, "Encrypted backup")
+    working_directory = _resolve_without_symlink(working_directory, "Backup working directory")
+    working_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        required_space = source.stat().st_size * 2 + 16 * 1024 * 1024
+        if shutil.disk_usage(working_directory).free < required_space:
+            raise BackupError("Not enough working space to verify the encrypted backup safely")
+    except OSError as failure:
+        raise BackupError("Encrypted backup or working directory cannot be inspected") from failure
+    key = _read_backup_key(key_file)
+    temporary = Path(tempfile.mkdtemp(
+        prefix=".encrypted-restore-staging-", dir=working_directory))
+    archive_path = temporary / "snapshot.tar"
+    snapshot = temporary / "snapshot"
+    try:
+        _decrypt_to_tar(source, archive_path, key)
+        _extract_authenticated_tar(archive_path, snapshot)
+        archive_path.unlink()
+        manifest = verify_backup(snapshot)
+        yield snapshot, manifest
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def verify_encrypted_backup(source, key_file, working_directory):
+    with decrypted_backup(source, key_file, working_directory) as (_, manifest):
+        return manifest
+
+
+def restore_encrypted_backup(source, key_file, database_path, upload_dir):
+    database_path = _resolve_without_symlink(database_path, "Database")
+    with decrypted_backup(source, key_file, database_path.parent) as (snapshot, _):
+        return restore_backup(snapshot, database_path, upload_dir)
+
+
 def _open_source(database_path):
     if not database_path.is_file() or database_path.is_symlink():
         raise BackupError(f"Database does not exist as a regular file: {database_path}")
@@ -67,9 +289,9 @@ def _open_source(database_path):
 
 def create_backup(destination, database_path, upload_dir):
     """Create an atomic directory snapshot of SQLite and every referenced file."""
-    destination = Path(destination).resolve()
-    database_path = Path(database_path).resolve()
-    upload_dir = Path(upload_dir).resolve()
+    destination = _resolve_without_symlink(destination, "Backup destination")
+    database_path = _resolve_without_symlink(database_path, "Database")
+    upload_dir = _resolve_without_symlink(upload_dir, "Upload directory")
     if destination.exists():
         raise BackupError(f"Backup destination already exists: {destination}")
     if destination == upload_dir or upload_dir in destination.parents:
@@ -155,7 +377,7 @@ def create_backup(destination, database_path, upload_dir):
 
 def verify_backup(source):
     """Validate manifest, hashes, SQLite integrity, schema, and attachment set."""
-    source = Path(source).resolve()
+    source = _resolve_without_symlink(source, "Backup source")
     manifest_path = source / MANIFEST_NAME
     try:
         if manifest_path.stat().st_size > 16 * 1024 * 1024:
@@ -232,9 +454,9 @@ def verify_backup(source):
 
 def restore_backup(source, database_path, upload_dir):
     """Validate and install a backup offline, rolling back any runtime failure."""
-    source = Path(source).resolve()
-    database_path = Path(database_path).resolve()
-    upload_dir = Path(upload_dir).resolve()
+    source = _resolve_without_symlink(source, "Backup source")
+    database_path = _resolve_without_symlink(database_path, "Database")
+    upload_dir = _resolve_without_symlink(upload_dir, "Upload directory")
     with operation_lock(database_path, exclusive=True, blocking=False):
         manifest = verify_backup(source)
         database_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

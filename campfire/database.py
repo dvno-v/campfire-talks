@@ -12,6 +12,22 @@ from .migrations.v002_legacy_compatibility import enforce_username_case_uniquene
 from .migrations.v002_legacy_compatibility import rebuild_sessions_with_stable_ids
 
 
+class Connection(sqlite3.Connection):
+    """Commit/rollback and close when used as a context manager.
+
+    sqlite3's default context manager manages only the transaction. Request
+    handlers open short-lived connections, so leaving close to garbage
+    collection needlessly retains descriptors and emits ResourceWarning on
+    current Python releases.
+    """
+
+    def __exit__(self, exception_type, exception, traceback):
+        try:
+            return super().__exit__(exception_type, exception, traceback)
+        finally:
+            self.close()
+
+
 def connect():
     """Open the database, keeping it readable only by the service account.
 
@@ -21,7 +37,7 @@ def connect():
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fresh = not DB_PATH.exists()
-    database = sqlite3.connect(DB_PATH, timeout=10)
+    database = sqlite3.connect(DB_PATH, timeout=10, factory=Connection)
     if fresh:
         restrict_permissions()
     database.row_factory = sqlite3.Row
@@ -103,6 +119,8 @@ def initialize_database():
         version = migrate_database(database)
         database.execute("DELETE FROM sessions WHERE expires_at<=?", (int(time.time()),))
         database.execute("DELETE FROM invitations WHERE expires_at<=?", (int(time.time()),))
+        database.execute("DELETE FROM upload_reservations WHERE expires_at<=?", (int(time.time()),))
+        database.execute("DELETE FROM webauthn_challenges WHERE expires_at<=?", (int(time.time()),))
         database.commit()
     finally:
         database.close()

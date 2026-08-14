@@ -19,6 +19,7 @@ operator clarity, and recoverability take priority over growth features.
 Status: complete
 
 - [x] Accounts, hardened sessions, and rate-limited login
+- [x] WebAuthn passkeys with password-confirmed credential management
 - [x] Invite-only onboarding with expiring hashed codes
 - [x] Communities, owner-managed channels, and membership authorization
 - [x] Persistent text chat and authorized live delivery
@@ -56,9 +57,10 @@ SQLite manually, and deletion behavior is covered by integration tests.
 
 Status: complete
 
-- [x] Versioned database migrations and transactional backup/restore commands
-- [x] Docker image and minimal Compose deployment
+- [x] Versioned database migrations and transactional encrypted backup/restore commands
+- [x] Docker image and isolated, resource-bounded Compose deployment
 - [x] HTTPS reverse-proxy example with metadata-minimized logs
+- [x] Bounded production ASGI HTTP layer with proxy/request timeouts
 - [x] Health/readiness endpoints and storage-capacity warnings
 - [x] Configuration validation that fails closed for unsafe public deployments
 - [x] Signed releases, dependency scanning, and a vulnerability-reporting policy

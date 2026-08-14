@@ -14,15 +14,25 @@ services:
       CAMPFIRE_TRUSTED_PROXIES: 172.31.238.2
       CAMPFIRE_MAX_STORAGE_BYTES: ${CAMPFIRE_MAX_STORAGE_BYTES:-10737418240}
       CAMPFIRE_STORAGE_WARNING_PERCENT: ${CAMPFIRE_STORAGE_WARNING_PERCENT:-90}
+      CAMPFIRE_MAX_EVENT_STREAMS: ${CAMPFIRE_MAX_EVENT_STREAMS:-32}
+      CAMPFIRE_MAX_EVENT_STREAMS_PER_USER: ${CAMPFIRE_MAX_EVENT_STREAMS_PER_USER:-4}
+      CAMPFIRE_MAX_CONCURRENT_REQUESTS: ${CAMPFIRE_MAX_CONCURRENT_REQUESTS:-64}
+      CAMPFIRE_REQUEST_WORKERS: ${CAMPFIRE_REQUEST_WORKERS:-64}
       CAMPFIRE_ACCESS_LOG: 0
     volumes:
       - campfire-data:/data
-      - ./backups:/backups
     expose:
       - "8000"
     networks:
       campfire-private:
         ipv4_address: 172.31.238.3
+    pids_limit: 128
+    mem_limit: 768m
+    cpus: 2.0
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -55,6 +65,14 @@ services:
     networks:
       campfire-private:
         ipv4_address: 172.31.238.2
+      caddy-public:
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 4096
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -70,12 +88,48 @@ services:
         max-size: 1m
         max-file: "2"
 
+  campfire-ops:
+    profiles:
+      - operations
+    build:
+      context: .
+    image: campfire:${CAMPFIRE_VERSION:-local}
+    restart: "no"
+    environment:
+      CAMPFIRE_DB: /data/campfire.db
+      CAMPFIRE_UPLOAD_DIR: /data/uploads
+    volumes:
+      - campfire-data:/data
+      - ./backups:/backups
+      - ./secrets:/run/secrets:ro
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      disable: true
+    logging:
+      driver: local
+      options:
+        max-size: 1m
+        max-file: "2"
+
 networks:
   campfire-private:
     driver: bridge
+    internal: true
     ipam:
       config:
         - subnet: 172.31.238.0/24
+  caddy-public:
+    driver: bridge
 
 volumes:
   campfire-data:

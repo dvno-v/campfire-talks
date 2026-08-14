@@ -244,6 +244,83 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["user"]["username"], "MixedCase")
 
+    def test_passkey_http_routes_require_reauthentication_and_issue_a_session(self):
+        username = f"http_passkey_{time.time_ns()}"
+        cookie = self.signed_in_with_password(username)
+        status, payload, _ = self.request(
+            "POST", "/api/passkeys/register/options",
+            {"current_password": "wrong password"}, cookie=cookie)
+        self.assertEqual(status, 403)
+
+        status, registration, _ = self.request(
+            "POST", "/api/passkeys/register/options",
+            {"current_password": PASSWORD}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(registration["options"]["rp"]["id"], "127.0.0.1")
+        stored = {"id": 7, "name": "Security key", "created_at": database.utc_now(),
+                  "last_used_at": None}
+        with patch("campfire.http.register_passkey", return_value=stored):
+            status, payload, _ = self.request(
+                "POST", "/api/passkeys/register/verify",
+                {"ceremony": registration["ceremony"], "name": "Security key",
+                 "credential": {"id": "browser-result"}}, cookie=cookie)
+        self.assertEqual((status, payload["name"]), (201, "Security key"))
+
+        status, login, _ = self.request(
+            "POST", "/api/passkeys/login/options", {"username": username})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(login["options"]["allowCredentials"]), 1)
+        identity = {"id": self.user_id_for(username), "username": username}
+        with patch("campfire.http.authenticate_passkey", return_value=identity):
+            status, payload, session = self.request(
+                "POST", "/api/passkeys/login/verify",
+                {"ceremony": login["ceremony"], "credential": {"id": "browser-result"}})
+        self.assertEqual((status, payload["user"]["username"]), (200, username))
+        self.assertTrue(session)
+
+    def test_only_one_simultaneous_empty_instance_registration_bootstraps(self):
+        original_path = database.DB_PATH
+        with tempfile.TemporaryDirectory() as folder:
+            isolated = Path(folder) / "bootstrap.db"
+            database.DB_PATH = isolated
+            server = ThreadingHTTPServer(("127.0.0.1", 0), App)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            try:
+                database.initialize_database()
+                thread.start()
+                barrier = threading.Barrier(6)
+                results = []
+
+                def register(index):
+                    barrier.wait()
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_address[1], timeout=10)
+                    body = json.dumps({
+                        "username": f"bootstrap_{index}", "password": PASSWORD, "invite": "",
+                    })
+                    connection.request("POST", "/api/register", body,
+                                       {"Content-Type": "application/json"})
+                    response = connection.getresponse()
+                    response.read()
+                    results.append(response.status)
+                    connection.close()
+
+                workers = [threading.Thread(target=register, args=(index,)) for index in range(6)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=15)
+                self.assertEqual(results.count(201), 1)
+                self.assertEqual(results.count(403), 5)
+                with database.connect() as db:
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 1)
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM communities").fetchone()[0], 1)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                database.DB_PATH = original_path
+
     def test_malformed_body_produces_exactly_one_response(self):
         """A second response to one request desynchronizes a keep-alive connection."""
         token = self.signed_in_user("framing_user")

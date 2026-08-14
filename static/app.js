@@ -13,8 +13,15 @@ function initials(name) { return name.slice(0, 2).toUpperCase(); }
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 // Values are interpolated into attributes as well as text, so quotes must escape too.
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (character) => HTML_ESCAPES[character]); }
+function base64urlBytes(value) { const normalized=String(value).replace(/-/g,'+').replace(/_/g,'/'); const binary=atob(normalized+'='.repeat((4-normalized.length%4)%4)); return Uint8Array.from(binary,character=>character.charCodeAt(0)); }
+function bytesBase64url(value) { if(value==null)return null; const bytes=new Uint8Array(value), chunk=0x8000; let binary=''; for(let offset=0;offset<bytes.length;offset+=chunk)binary+=String.fromCharCode(...bytes.subarray(offset,offset+chunk)); return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+function creationOptions(options) { const copy=structuredClone(options); copy.challenge=base64urlBytes(copy.challenge); copy.user.id=base64urlBytes(copy.user.id); copy.excludeCredentials=(copy.excludeCredentials||[]).map(item=>({...item,id:base64urlBytes(item.id)})); return copy; }
+function requestOptions(options) { const copy=structuredClone(options); copy.challenge=base64urlBytes(copy.challenge); copy.allowCredentials=(copy.allowCredentials||[]).map(item=>({...item,id:base64urlBytes(item.id)})); return copy; }
+function registrationCredential(credential) { return {id:credential.id,rawId:bytesBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,response:{clientDataJSON:bytesBase64url(credential.response.clientDataJSON),attestationObject:bytesBase64url(credential.response.attestationObject),transports:credential.response.getTransports?.()||[]}}; }
+function authenticationCredential(credential) { return {id:credential.id,rawId:bytesBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment,response:{clientDataJSON:bytesBase64url(credential.response.clientDataJSON),authenticatorData:bytesBase64url(credential.response.authenticatorData),signature:bytesBase64url(credential.response.signature),userHandle:bytesBase64url(credential.response.userHandle)}}; }
 function showAuth() {
   state.eventSource?.close(); state.eventSource = null; state.user = null;
+  setAuthMode(false);
   setNavOpen(false); $('#members-panel').classList.remove('open');
   if ($('#account-dialog').open) $('#account-dialog').close();
   $('#password-form').reset(); $('#delete-account-form').reset();
@@ -539,9 +546,19 @@ async function deleteMessage(message) {
 function scrollMessages() { const list = $('#messages'); list.scrollTop = list.scrollHeight; }
 function formatBytes(value) { const bytes=Number(value)||0; if(bytes < 1024*1024) return `${Math.ceil(bytes/1024)} KB`; if(bytes < 1024*1024*1024) return `${(bytes/1024/1024).toFixed(1)} MB`; return `${(bytes/1024/1024/1024).toFixed(2)} GB`; }
 
-function setAuthMode(register) { registering = register; $('#auth-submit').textContent = registering ? 'Create account' : 'Sign in'; $('#auth-toggle').textContent = registering ? 'Already have an account? Sign in' : 'New here? Create an account'; $('#password').autocomplete = registering ? 'new-password' : 'current-password'; $('#invite-label').classList.toggle('hidden', !registering); }
+function setAuthMode(register) { registering = register; $('#auth-submit').textContent = registering ? 'Create account' : 'Sign in'; $('#auth-toggle').textContent = registering ? 'Already have an account? Sign in' : 'New here? Create an account'; $('#password').autocomplete = registering ? 'new-password' : 'current-password'; $('#invite-label').classList.toggle('hidden', !registering); $('#passkey-login').classList.toggle('hidden',registering||!window.PublicKeyCredential); }
 $('#auth-toggle').onclick = () => setAuthMode(!registering);
 $('#auth-form').onsubmit = async (event) => { event.preventDefault(); $('#auth-error').textContent = ''; try { await api(registering ? '/api/register' : '/api/login', { method:'POST', body:JSON.stringify({username:$('#username').value,password:$('#password').value,invite:$('#invite').value}) }); await enterApp(); } catch (error) { $('#auth-error').textContent = error.message; } };
+$('#passkey-login').onclick = async () => {
+  const status=$('#auth-error'), button=$('#passkey-login'); status.textContent=''; button.disabled=true;
+  try {
+    const start=await api('/api/passkeys/login/options',{method:'POST',body:JSON.stringify({username:$('#username').value})});
+    const credential=await navigator.credentials.get({publicKey:requestOptions(start.options)});
+    await api('/api/passkeys/login/verify',{method:'POST',body:JSON.stringify({ceremony:start.ceremony,credential:authenticationCredential(credential)})});
+    await enterApp();
+  } catch(error){status.textContent=error.name==='NotAllowedError'?'Passkey sign-in was cancelled.':error.message;}
+  finally{button.disabled=false;}
+};
 $('#message-form').onsubmit = sendMessage;
 $('#message').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(event); } };
 async function sendMessage(event) { event.preventDefault(); const input=$('#message'), body=input.value.trim(); if(!body || !state.channel)return; input.value=''; try { const message=await api(`/api/channels/${state.channel.id}/messages`,{method:'POST',body:JSON.stringify({body})}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); readActiveChannel(); } catch(error){ input.value=body; alert(error.message); } }
@@ -579,8 +596,8 @@ document.addEventListener('keydown', event => {
 window.addEventListener('resize', () => { if (!navIsDrawer()) setNavOpen(false); });
 $('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
-$('#account-settings').onclick = async () => { closeNavOnDrawer(); $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadDeletionPlan()]); };
-$('#close-account').onclick = () => { $('#password-form').reset(); $('#delete-account-form').reset(); $('#account-dialog').close(); };
+$('#account-settings').onclick = async () => { closeNavOnDrawer(); $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#passkey-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadPasskeys(), loadDeletionPlan()]); };
+$('#close-account').onclick = () => { $('#password-form').reset(); $('#passkey-form').reset(); $('#delete-account-form').reset(); $('#account-dialog').close(); };
 $('#password-form').onsubmit = async event => {
   event.preventDefault();
   const status=$('#password-status'), current=$('#current-password').value, next=$('#new-password').value;
@@ -604,6 +621,33 @@ async function loadSessions() {
 async function revokeSession(sessionId) {
   if(!confirm('Sign out that session? Its live connection will close within a couple of seconds.'))return;
   try{await api(`/api/sessions/${sessionId}`,{method:'DELETE'});await loadSessions();}catch(error){alert(error.message);}
+}
+async function loadPasskeys() {
+  const list=$('#passkey-list');
+  if(!window.PublicKeyCredential){list.innerHTML='<p class="member-empty">This browser does not support passkeys.</p>';$('#passkey-form').classList.add('hidden');return;}
+  $('#passkey-form').classList.remove('hidden'); list.innerHTML='<p class="member-empty">Loading passkeys…</p>';
+  try {
+    const data=await api('/api/passkeys');
+    list.innerHTML=data.passkeys.length?data.passkeys.map(passkey=>`<article class="invite-row"><div><strong>${escapeHTML(passkey.name)}</strong><span>Added ${new Date(passkey.created_at).toLocaleString()}</span><span>${passkey.last_used_at?`Last used ${new Date(passkey.last_used_at).toLocaleString()}`:'Not used yet'}</span></div><button type="button" data-delete-passkey="${Number(passkey.id)}">Remove</button></article>`).join(''):'<p class="member-empty">No passkeys registered yet.</p>';
+    document.querySelectorAll('[data-delete-passkey]').forEach(button=>button.onclick=()=>deletePasskey(Number(button.dataset.deletePasskey)));
+  } catch(error){list.innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`;}
+}
+$('#passkey-form').onsubmit = async event => {
+  event.preventDefault(); const status=$('#passkey-status'), button=event.currentTarget.querySelector('button'); status.classList.remove('error');status.textContent='';button.disabled=true;
+  try {
+    const start=await api('/api/passkeys/register/options',{method:'POST',body:JSON.stringify({current_password:$('#passkey-password').value})});
+    const credential=await navigator.credentials.create({publicKey:creationOptions(start.options)});
+    await api('/api/passkeys/register/verify',{method:'POST',body:JSON.stringify({ceremony:start.ceremony,name:$('#passkey-name').value,credential:registrationCredential(credential)})});
+    event.currentTarget.reset();status.textContent='Passkey added.';await loadPasskeys();
+  } catch(error){status.classList.add('error');status.textContent=error.name==='NotAllowedError'?'Passkey registration was cancelled.':error.message;}
+  finally{button.disabled=false;}
+};
+async function deletePasskey(passkeyId) {
+  const password=$('#passkey-password').value,status=$('#passkey-status');status.classList.remove('error');
+  if(!password){status.classList.add('error');status.textContent='Enter your current password above before removing a passkey.';return;}
+  if(!confirm('Remove this passkey? Devices using it will no longer sign in.'))return;
+  try{await api(`/api/passkeys/${passkeyId}`,{method:'DELETE',body:JSON.stringify({current_password:password})});status.textContent='Passkey removed.';await loadPasskeys();}
+  catch(error){status.classList.add('error');status.textContent=error.message;}
 }
 // Ownership moving to someone else, or a community disappearing entirely, are
 // consequences worth reading before the password box, not after the deletion.

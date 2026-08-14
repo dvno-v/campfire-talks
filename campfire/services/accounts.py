@@ -87,6 +87,8 @@ def export_account(database, actor_id, exported_at=None):
         "account": dict(account),
         "sessions": rows("""SELECT created_at,expires_at FROM sessions
                             WHERE user_id=? ORDER BY created_at"""),
+        "passkeys": rows("""SELECT name,created_at,last_used_at FROM passkeys
+                            WHERE user_id=? ORDER BY created_at,id"""),
         "communities": rows("""
           SELECT c.id,c.name,c.created_at,
             CASE WHEN c.owner_id=m.user_id THEN 'owner' ELSE m.role END role

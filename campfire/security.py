@@ -7,27 +7,41 @@ import re
 import secrets
 import threading
 import time
+from collections import deque
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{2,24}$")
 PASSWORD_ITERATIONS = 600_000
 
 
 class RateLimiter:
-    """Small limiter that intentionally stores no durable client history."""
+    """Small, memory-bounded limiter that stores no durable client history."""
 
-    def __init__(self, attempts=8, window=300):
+    def __init__(self, attempts=8, window=300, max_entries=4096, max_key_bytes=256):
         self.attempts = attempts
         self.window = window
+        self.max_entries = max_entries
+        self.max_key_bytes = max_key_bytes
         self._entries = {}
         self._last_sweep = 0
         self._lock = threading.Lock()
 
     def allow(self, key, timestamp=None):
-        timestamp = timestamp or time.time()
+        timestamp = time.time() if timestamp is None else timestamp
+        if not isinstance(key, str) or len(key.encode("utf-8")) > self.max_key_bytes:
+            return False
         with self._lock:
             if timestamp - self._last_sweep >= self.window:
                 self._sweep(timestamp)
-            recent = [seen for seen in self._entries.get(key, []) if seen > timestamp - self.window]
+            if key not in self._entries and len(self._entries) >= self.max_entries:
+                # A flood within one live window cannot allocate past the fixed
+                # ceiling. Expired entries get one eager chance to make room.
+                self._sweep(timestamp)
+                if len(self._entries) >= self.max_entries:
+                    return False
+            recent = self._entries.get(key, deque())
+            cutoff = timestamp - self.window
+            while recent and recent[0] <= cutoff:
+                recent.popleft()
             if len(recent) >= self.attempts:
                 self._entries[key] = recent
                 return False
@@ -43,7 +57,7 @@ class RateLimiter:
         varying the username on failed sign-in attempts.
         """
         cutoff = timestamp - self.window
-        for key in [key for key, seen in self._entries.items() if not seen or max(seen) <= cutoff]:
+        for key in [key for key, seen in self._entries.items() if not seen or seen[-1] <= cutoff]:
             del self._entries[key]
         self._last_sweep = timestamp
 
@@ -53,6 +67,10 @@ class RateLimiter:
 
 
 AUTH_LIMITER = RateLimiter()
+# Every authentication request first spends from a key containing only the
+# operation and a parsed network address. Account keys are a second layer, not
+# a substitute: an attacker must never allocate memory by inventing usernames.
+AUTH_IP_LIMITER = RateLimiter(attempts=30, window=300)
 UPLOAD_LIMITER = RateLimiter(attempts=20, window=60)
 
 
@@ -100,6 +118,12 @@ def password_hash(password, salt=None):
     salt = salt or secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PASSWORD_ITERATIONS)
     return f"pbkdf2_sha256${PASSWORD_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+# A missing account still performs one real password comparison. This keeps the
+# response path close to an existing account without storing a fake account or
+# deriving a new hash for every hostile request.
+DUMMY_PASSWORD_HASH = password_hash("not an account password")
 
 
 def password_matches(password, encoded):

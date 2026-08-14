@@ -8,11 +8,12 @@ separate modules and explicit dependency directions.
 server.py                 compatibility process entry point
     │
     └── campfire/__main__.py  serve/migrate/backup/restore operator commands
-          ├── operations.py  consistent snapshot verification and restore
+          ├── operations.py  snapshot encryption, verification, and restore
           ├── migrations/   immutable ordered schema versions
           ├── config.py      parsing, validation, and filesystem locations
           ├── database.py    connections, migration runner, serializers
-          └── http.py        routing, authorization calls, response policy
+          └── asgi.py        bounded Uvicorn-to-handler adapter
+                └── http.py  routing, authorization calls, response policy
                 ├── security.py  password/session/invite primitives and limits
                 ├── uploads.py   hostile image-name and signature validation
                 ├── realtime.py  in-process event fan-out and presence
@@ -31,8 +32,9 @@ docs/                     security, privacy, API, operations, and roadmap
   reinterpret environment variables.
 - Database connections, migration transactions, and row serialization live in
   `database.py`; immutable version steps live under `migrations/`.
-- `operations.py` owns backup manifests, hashes, SQLite snapshots, and offline
-  restore. HTTP handlers do not reinterpret those filesystem workflows.
+- `operations.py` owns backup manifests, hashes, SQLite snapshots,
+  AES-256-GCM archives, safe extraction, and offline restore. HTTP handlers do
+  not reinterpret those filesystem workflows.
 - Password and token algorithms live in `security.py`, not request handlers.
 - Raw upload validation is isolated because it handles hostile bytes and names.
 - The HTTP layer remains responsible for authenticating requests and applying
@@ -68,6 +70,8 @@ sign-out permanently out of reach. Nothing in the shell is hidden with
 
 ```text
 browser request
+  → Caddy request/time/resource bounds
+  → Uvicorn HTTP parsing and bounded ASGI adapter
   → same-origin/security-header policy
   → session lookup
   → community/channel authorization
@@ -101,6 +105,7 @@ the privilege ladder and owns membership removal and ban workflows,
 `services/channels.py` owns per-channel posting rules,
 `services/retention.py` owns scheduled deletion of expired history,
 `services/storage.py` owns disk accounting and the upload ceiling,
+`services/passkeys.py` owns one-time WebAuthn ceremonies and credential state,
 `services/messages.py` decides who may edit or delete, and
 `services/notifications.py` decides what each account has read and wants told.
 The HTTP layer keeps the decision about which status code reveals what. Those

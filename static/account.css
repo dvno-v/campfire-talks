@@ -19,6 +19,10 @@
   padding-bottom: 24px;
 }
 
+.passkey-form {
+  margin-top: 12px;
+}
+
 .password-form label {
   color: #c8c7ce;
   font-size: 12px;

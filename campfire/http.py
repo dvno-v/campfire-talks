@@ -17,7 +17,7 @@ import threading
 import time
 from contextlib import closing
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -31,7 +31,8 @@ from .database import connect, initialize_database, message_from_row, schema_ver
 from .instance_lock import operation_lock, server_lock
 from .migrations import LATEST_SCHEMA_VERSION
 from .realtime import BROKER
-from .security import AUTH_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
+from .security import AUTH_IP_LIMITER, AUTH_LIMITER, DUMMY_PASSWORD_HASH
+from .security import PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
 from .services.accounts import change_password as change_account_password
@@ -49,10 +50,13 @@ from .services.communities import revoke_invite as revoke_community_invite
 from .services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from .services.notifications import NOTIFICATION_MODES, account_mode, channel_states
 from .services.notifications import mark_community_read, mark_read, set_account_mode, set_channel_mode
+from .services.passkeys import PasskeyError, authenticate_passkey, authentication_options
+from .services.passkeys import list_passkeys, register_passkey, registration_options, remove_passkey
 from .services.retention import MAX_RETENTION_DAYS, purge_expired
 from .services.retention import set_retention as set_community_retention
-from .services.storage import capacity_warnings, directory_bytes, exceeds_limit
+from .services.storage import begin_reserved_upload_write, capacity_warnings, directory_bytes
 from .services.storage import filesystems_have_space
+from .services.storage import release_upload, reserve_upload
 from .services.storage import usage as storage_usage, writable_location
 from .uploads import detect_image_type, safe_original_name, strip_metadata
 
@@ -94,6 +98,22 @@ _STYLESHEET_PATHS = frozenset(
 )
 
 
+def response_security_headers():
+    headers = [
+        ("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'"),
+        ("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self), geolocation=()"),
+        ("Referrer-Policy", "no-referrer"),
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Cross-Origin-Opener-Policy", "same-origin"),
+        ("Cross-Origin-Resource-Policy", "same-origin"),
+        ("X-Robots-Tag", "noindex, nofollow, noarchive"),
+    ]
+    if SECURE_COOKIES:
+        headers.append(("Strict-Transport-Security", "max-age=31536000"))
+    return headers
+
+
 class InvalidBody(Exception):
     """Raised once a malformed request body has already been answered.
 
@@ -107,17 +127,12 @@ class App(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"
 
+    def add_security_headers(self):
+        for name, value in response_security_headers():
+            self.send_header(name, value)
+
     def end_headers(self):
-        self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'; object-src 'none'")
-        self.send_header("Permissions-Policy", "camera=(self), microphone=(self), display-capture=(self), geolocation=()")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
-        self.send_header("X-Robots-Tag", "noindex, nofollow, noarchive")
-        if SECURE_COOKIES:
-            self.send_header("Strict-Transport-Security", "max-age=31536000")
+        self.add_security_headers()
         super().end_headers()
 
     def log_message(self, fmt, *args):
@@ -199,11 +214,21 @@ class App(BaseHTTPRequestHandler):
         peer = self.client_address[0] if self.client_address else ""
         return client_address(peer, self.headers.get("X-Forwarded-For"), TRUSTED_PROXIES)
 
-    def auth_limit_key(self, scope):
-        return f"{self.client_ip()}:{scope.casefold()}"
+    def auth_limit_key(self, operation, subject=None):
+        key = f"{self.client_ip()}:{operation.casefold()}"
+        if subject is not None:
+            key += f":{str(subject).casefold()}"
+        return key
 
-    def rate_limit_auth(self, scope):
-        if AUTH_LIMITER.allow(self.auth_limit_key(scope)):
+    def rate_limit_auth(self, operation, subject=None):
+        # The first bucket has a fixed-size key controlled by the server. A
+        # syntactically valid account identifier may additionally spend from a
+        # global account bucket, preventing a distributed password spray.
+        if not AUTH_IP_LIMITER.allow(self.auth_limit_key(operation)):
+            self.error(HTTPStatus.TOO_MANY_REQUESTS,
+                       "Too many attempts. Wait a few minutes and try again")
+            return False
+        if subject is None or AUTH_LIMITER.allow(f"{operation.casefold()}:{str(subject).casefold()}"):
             return True
         self.error(HTTPStatus.TOO_MANY_REQUESTS, "Too many attempts. Wait a few minutes and try again")
         return False
@@ -223,6 +248,8 @@ class App(BaseHTTPRequestHandler):
             return self.unread_state()
         if path == "/api/sessions":
             return self.active_sessions()
+        if path == "/api/passkeys":
+            return self.active_passkeys()
         if path == "/api/storage":
             return self.storage_usage()
         if path == "/api/account/export":
@@ -253,6 +280,10 @@ class App(BaseHTTPRequestHandler):
         routes = {
             "/api/register": self.register,
             "/api/login": self.login,
+            "/api/passkeys/login/options": self.passkey_login_options,
+            "/api/passkeys/login/verify": self.passkey_login_verify,
+            "/api/passkeys/register/options": self.passkey_registration_options,
+            "/api/passkeys/register/verify": self.passkey_registration_verify,
             "/api/logout": self.logout,
             "/api/communities": self.create_community,
             "/api/channels": self.create_channel,
@@ -292,6 +323,8 @@ class App(BaseHTTPRequestHandler):
                 return self.kick_member(path)
             if path.startswith("/api/sessions/"):
                 return self.revoke_session(path)
+            if path.startswith("/api/passkeys/"):
+                return self.delete_passkey(path)
         except InvalidBody:
             return
         return self.error(HTTPStatus.NOT_FOUND, "Not found")
@@ -335,6 +368,10 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.BAD_REQUEST, "Password must be 12–1024 characters")
         try:
             with connect() as db:
+                # Serialize the empty-instance decision with user creation. A
+                # second registration waits here, then observes the first user
+                # and must present an invitation.
+                db.execute("BEGIN IMMEDIATE")
                 user_count = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
                 invitation = valid_invite(db, invite_token)
                 if user_count and not invitation:
@@ -372,18 +409,25 @@ class App(BaseHTTPRequestHandler):
     def login(self):
         body = self.json_body()
         attempted_username = str(body.get("username", "")).strip()
-        if not self.rate_limit_auth(f"login:{attempted_username}"):
+        password = str(body.get("password", ""))
+        valid_username = USERNAME_RE.fullmatch(attempted_username) is not None
+        if not self.rate_limit_auth("login", attempted_username if valid_username else None):
             return
+        if not valid_username or len(password) > 1024:
+            if len(password) <= 1024:
+                password_matches(password, DUMMY_PASSWORD_HASH)
+            return self.error(HTTPStatus.UNAUTHORIZED, "Incorrect username or password")
         with connect() as db:
             row = db.execute("SELECT id,username,password_hash FROM users WHERE username = ? COLLATE NOCASE",
                              (attempted_username,)).fetchone()
-        if not row or not password_matches(str(body.get("password", "")), row["password_hash"]):
+        matched = password_matches(password, row["password_hash"] if row else DUMMY_PASSWORD_HASH)
+        if not row or not matched:
             return self.error(HTTPStatus.UNAUTHORIZED, "Incorrect username or password")
         if not row["password_hash"].startswith(f"pbkdf2_sha256${PASSWORD_ITERATIONS}$"):
             with connect() as db:
                 db.execute("UPDATE users SET password_hash=? WHERE id=?",
-                           (password_hash(str(body.get("password", ""))), row["id"]))
-        AUTH_LIMITER.clear(self.auth_limit_key(f"login:{attempted_username}"))
+                           (password_hash(password), row["id"]))
+        AUTH_LIMITER.clear(f"login:{attempted_username.casefold()}")
         return self.start_session(row["id"], row["username"])
 
     def start_session(self, user_id, username, status=HTTPStatus.OK):
@@ -394,6 +438,117 @@ class App(BaseHTTPRequestHandler):
                        (session_hash(token), user_id, expires, utc_now()))
         return self.send_json({"user": {"id": user_id, "username": username}}, status,
                               {"Set-Cookie": self.session_cookie(token)})
+
+    def webauthn_context(self):
+        origin = PUBLIC_ORIGIN or f"{'https' if SECURE_COOKIES else 'http'}://{self.headers.get('Host', '')}"
+        parsed = urlparse(origin)
+        if not parsed.hostname:
+            raise PasskeyError("Passkeys require a valid application origin")
+        return parsed.hostname, origin
+
+    def passkey_login_options(self):
+        body = self.json_body()
+        username = str(body.get("username", "")).strip()
+        valid_username = USERNAME_RE.fullmatch(username) is not None
+        if not self.rate_limit_auth("passkey-login", username if valid_username else None):
+            return
+        try:
+            rp_id, _ = self.webauthn_context()
+            with connect() as db:
+                ceremony, options = authentication_options(
+                    db, username if valid_username else "", rp_id)
+        except PasskeyError:
+            return self.error(HTTPStatus.SERVICE_UNAVAILABLE,
+                              "Passkey authentication is temporarily unavailable")
+        self.send_json({"ceremony": ceremony, "options": options})
+
+    def passkey_login_verify(self):
+        body = self.json_body()
+        if not self.rate_limit_auth("passkey-verify"):
+            return
+        ceremony = str(body.get("ceremony", ""))
+        credential = body.get("credential")
+        if not 20 <= len(ceremony) <= 128 or not isinstance(credential, dict):
+            return self.error(HTTPStatus.UNAUTHORIZED, "Passkey authentication failed")
+        try:
+            rp_id, origin = self.webauthn_context()
+            with connect() as db:
+                user = authenticate_passkey(db, ceremony, credential, rp_id, origin)
+        except PasskeyError:
+            return self.error(HTTPStatus.UNAUTHORIZED, "Passkey authentication failed")
+        AUTH_LIMITER.clear(f"passkey-login:{user['username'].casefold()}")
+        return self.start_session(user["id"], user["username"])
+
+    def active_passkeys(self):
+        user = self.require_user()
+        if not user:
+            return
+        with connect() as db:
+            passkeys = list_passkeys(db, user["id"])
+        self.send_json({"passkeys": passkeys})
+
+    def passkey_registration_options(self):
+        user = self.require_user()
+        if not user:
+            return
+        body = self.json_body()
+        current_password = str(body.get("current_password", ""))
+        if len(current_password) > 1024:
+            return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+        if not self.rate_limit_auth("passkey-register", user["id"]):
+            return
+        try:
+            rp_id, _ = self.webauthn_context()
+            with connect() as db:
+                ceremony, options = registration_options(
+                    db, user["id"], current_password, rp_id)
+        except PasskeyError as failure:
+            if "password" in str(failure).casefold():
+                return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+            return self.error(HTTPStatus.SERVICE_UNAVAILABLE,
+                              "Passkey registration is temporarily unavailable")
+        self.send_json({"ceremony": ceremony, "options": options})
+
+    def passkey_registration_verify(self):
+        user = self.require_user()
+        if not user:
+            return
+        body = self.json_body()
+        ceremony = str(body.get("ceremony", ""))
+        name = str(body.get("name", ""))
+        credential = body.get("credential")
+        if not 20 <= len(ceremony) <= 128 or not isinstance(credential, dict):
+            return self.error(HTTPStatus.BAD_REQUEST, "Passkey verification failed")
+        try:
+            rp_id, origin = self.webauthn_context()
+            with connect() as db:
+                stored = register_passkey(
+                    db, user["id"], ceremony, credential, name, rp_id, origin)
+        except (PasskeyError, sqlite3.IntegrityError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Passkey verification failed")
+        self.send_json(stored, HTTPStatus.CREATED)
+
+    def delete_passkey(self, path):
+        user = self.require_user()
+        if not user:
+            return
+        try:
+            passkey_id = int(path.split("/")[3])
+        except (ValueError, IndexError):
+            return self.error(HTTPStatus.BAD_REQUEST, "Invalid passkey")
+        password = str(self.json_body().get("current_password", ""))
+        if len(password) > 1024:
+            return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+        if not self.rate_limit_auth("passkey-delete", user["id"]):
+            return
+        with connect() as db:
+            removed = remove_passkey(db, user["id"], passkey_id, password)
+        if removed is None:
+            return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
+        if not removed:
+            return self.error(HTTPStatus.NOT_FOUND, "Passkey not found")
+        AUTH_LIMITER.clear(f"passkey-delete:{user['id']}")
+        self.send_json({"ok": True})
 
     def logout(self):
         cookies = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
@@ -446,7 +601,7 @@ class App(BaseHTTPRequestHandler):
         # Charged here rather than on entry: the checks above are the client's
         # own mistakes to make, and spending the allowance on them would lock
         # someone out for five minutes without a password ever being compared.
-        if not self.rate_limit_auth(f"password:{user['id']}"):
+        if not self.rate_limit_auth("password", user["id"]):
             return
         replacement = secrets.token_urlsafe(32)
         with connect() as database:
@@ -455,7 +610,7 @@ class App(BaseHTTPRequestHandler):
                                               session_hash(replacement))
         if revoked is None:
             return self.error(HTTPStatus.FORBIDDEN, "Current password is incorrect")
-        AUTH_LIMITER.clear(self.auth_limit_key(f"password:{user['id']}"))
+        AUTH_LIMITER.clear(f"password:{user['id']}")
         self.send_json({"ok": True, "revoked_sessions": revoked},
                        headers={"Set-Cookie": self.session_cookie(replacement)})
 
@@ -542,7 +697,7 @@ class App(BaseHTTPRequestHandler):
         password = str(self.json_body().get("current_password", ""))
         if len(password) > 1024:
             return self.error(HTTPStatus.BAD_REQUEST, "Invalid current password")
-        if not self.rate_limit_auth(f"delete:{user['id']}"):
+        if not self.rate_limit_auth("delete", user["id"]):
             return
         with connect() as database:
             # Read the memberships before they are gone: the clients that must
@@ -556,7 +711,7 @@ class App(BaseHTTPRequestHandler):
             return self.error(HTTPStatus.NOT_FOUND, "Account not found")
         for orphaned_file in plan["orphaned_files"]:
             (UPLOAD_DIR / orphaned_file).unlink(missing_ok=True)
-        AUTH_LIMITER.clear(self.auth_limit_key(f"delete:{user['id']}"))
+        AUTH_LIMITER.clear(f"delete:{user['id']}")
         for community_id in communities:
             # `deleted_account` tells the remaining members that history changed
             # underneath them, not merely the member list.
@@ -1141,16 +1296,31 @@ class App(BaseHTTPRequestHandler):
             if not context:
                 self.close_connection = True
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
-            # Refuse before reading the body: an upload the channel will not
-            # accept should not be carried across the network first.
+            # Refuse before image parsing and storage. The production edge has
+            # already bounded and flow-controlled the raw request body.
             if self.refused_posting(db, context, user["id"], uploading=True):
                 self.close_connection = True
                 return
-            if exceeds_limit(db, MAX_STORAGE_BYTES, length):
+            reservation_token = secrets.token_hex(32)
+            if not reserve_upload(db, reservation_token, MAX_STORAGE_BYTES, length):
                 self.close_connection = True
                 return self.error(HTTPStatus.INSUFFICIENT_STORAGE,
                                   "This instance is out of image storage. "
                                   "Ask an administrator to free space or raise the limit")
+        return self.store_upload_body(channel_id, user, length, reservation_token)
+
+    def store_upload_body(self, channel_id, user, length, reservation_token):
+        """Read, validate, and atomically settle one capacity reservation."""
+        try:
+            return self._store_upload_body(channel_id, user, length, reservation_token)
+        finally:
+            # Successful settlement already removed it in the attachment
+            # transaction. Every validation, disconnect, and I/O failure lands
+            # here as well, so capacity cannot leak until the expiry sweep.
+            with connect() as db:
+                release_upload(db, reservation_token)
+
+    def _store_upload_body(self, channel_id, user, length, reservation_token):
         content = self.rfile.read(length)
         if len(content) != length:
             self.close_connection = True
@@ -1176,12 +1346,17 @@ class App(BaseHTTPRequestHandler):
         os.chmod(UPLOAD_DIR, 0o700)  # mkdir's mode is subject to the umask; this is not
         storage_name = f"{secrets.token_hex(24)}{storage_extension}"
         destination = UPLOAD_DIR / storage_name
-        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
-            with os.fdopen(descriptor, "wb") as stored:
-                stored.write(content)
-            created = utc_now()
             with connect() as db:
+                if not begin_reserved_upload_write(
+                        db, reservation_token, MAX_STORAGE_BYTES, stored_size):
+                    return self.error(HTTPStatus.INSUFFICIENT_STORAGE,
+                                      "This instance is out of image storage. "
+                                      "Ask an administrator to free space or raise the limit")
+                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as stored:
+                    stored.write(content)
+                created = utc_now()
                 attachment_id = db.execute("""INSERT INTO attachments
                   (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
                   VALUES(?,?,?,?,?,?,?)""",
@@ -1394,7 +1569,8 @@ def main():
         initialize_database()
         start_retention_sweeper()
         print(f"Campfire is running at http://{HOST}:{PORT}")
-        ThreadingHTTPServer((HOST, PORT), App).serve_forever()
+        from .asgi import serve
+        serve()
 
 
 if __name__ == "__main__":

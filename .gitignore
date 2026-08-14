@@ -2,5 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 data/
+backups/
+secrets/
 .env
 .DS_Store

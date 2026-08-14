@@ -17,6 +17,14 @@ encrypted. A compromised host, browser, or administrator can read them.
 
 - Passwords use PBKDF2-HMAC-SHA256 with a random 128-bit salt and 600,000
   iterations. Existing hashes from the first prototype are upgraded on login.
+- Passkeys use WebAuthn with an exact relying-party ID and origin, mandatory
+  user verification, one-time five-minute challenges stored only behind random
+  token digests, and authenticator sign-counter verification. Unknown accounts
+  and accounts without a passkey receive the same shaped fake credential
+  request. Adding or removing a passkey requires the current password; only
+  public credential material is stored. The password remains recovery, so a
+  passkey is phishing-resistant alternative authentication rather than forced
+  two-factor authentication.
 - After the initial owner account, registration requires a random, expiring
   invite. Only a SHA-256 digest of each invite is stored.
 - Active invite metadata and revocation require an administrator-or-higher
@@ -26,8 +34,10 @@ encrypted. A compromised host, browser, or administrator can read them.
   invite outlives its author's membership, so a banned administrator would
   otherwise keep admitting people through codes already distributed — the one
   case where a ban does not end the access it was meant to end.
-- Authentication attempts are limited in memory to eight per client and
-  operation scope per five-minute window. Addresses are not persisted. Behind a
+- Authentication attempts first spend from a fixed per-address bucket and,
+  after bounded syntax validation, a separate per-account bucket. Limiter keys,
+  entries, and timestamp queues have hard memory ceilings. Addresses are not
+  persisted. Behind a
   reverse proxy set `CAMPFIRE_TRUSTED_PROXIES`, or every user shares one bucket
   and a single attacker can lock out the instance; forwarding headers are
   ignored unless the peer is a proxy the operator named.
@@ -65,8 +75,8 @@ encrypted. A compromised host, browser, or administrator can read them.
   declared length cannot be trusted, the connection is closed. Two responses to
   one request would let a shared proxy connection serve the second to another
   client.
-- Rate-limiter keys include caller-supplied values such as attempted usernames,
-  so expired entries are swept to bound memory.
+- Rate-limiter keys include only bounded values; oversized or over-capacity new
+  keys fail closed, and expired entries are swept.
 - State-changing browser requests reject cross-site fetches and mismatched
   `Origin` headers.
 - Responses apply a same-origin Content Security Policy, deny framing and MIME
@@ -94,11 +104,11 @@ encrypted. A compromised host, browser, or administrator can read them.
   checks it before consuming an invite. The removed account receives only its
   own removal event; subsequent community events fail the normal membership
   check.
-- Image storage has an optional instance ceiling. It is checked before an
-  upload's body is read, so a refused upload is never carried across the
-  network first, and it is counted from the same attachment rows that
-  authorization and deletion use. Usage reporting requires administering at
-  least one community.
+- Image storage has an optional instance ceiling. Capacity is reserved in an
+  immediate transaction and settled in the same transaction as the attachment
+  and message, so concurrent uploads cannot all pass the same stale quota
+  check. It is counted from the same attachment rows that authorization and
+  deletion use. Usage reporting requires administering at least one community.
 - Liveness and readiness probes are unauthenticated so a local supervisor can
   use them, but expose no account data, paths, capacity totals, or exception
   text. Readiness checks the required schema, writable data locations, and that
@@ -113,7 +123,8 @@ encrypted. A compromised host, browser, or administrator can read them.
 - Channels carry their own posting rules: a minimum role to contribute, a slow
   mode measured from the author's last message in that channel, and whether
   images are accepted. All three are enforced server-side on both the message
-  and upload paths, and an upload is refused before its body is read. They
+  and upload paths; image parsing and persistence happen only after the rule
+  check. They
   restrict contributing, not reading: every member of a community can still
   read every one of its channels, and that boundary is stated rather than
   implied because a rule enforced in three places out of four is worse than no
@@ -136,21 +147,34 @@ encrypted. A compromised host, browser, or administrator can read them.
   XMP, comments, timestamps, appended trailers and colour profiles, so a shared
   photo does not carry where it was taken. Anything that does not parse exactly
   as its format requires is refused rather than stored unstripped.
-- Live streams are bounded per host and per account, so opening connections
-  cannot exhaust threads and memory; past the limit Campfire answers `503`.
+- A single-process Uvicorn edge provides standards-based HTTP parsing, flow
+  control, a global connection/request ceiling, a finite backlog, bounded
+  request-body allocation, short keep-alives, and a fixed handler executor.
+  Caddy additionally enforces header/body/idle and upstream-response timeouts.
+- Live streams are bounded per host and per account within the fixed handler
+  pool; past the limit Campfire answers `503`.
 - Access logging is disabled unless the operator explicitly enables it.
 - A non-loopback listener fails before migration or binding unless it has one
   exact HTTPS origin, secure cookies, an explicit trusted proxy, and a finite
   storage ceiling. Numeric configuration is range-checked, and contradictory
   event-stream limits are rejected.
 - Schema migrations are ordered, recorded, and individually transactional.
+  Empty-instance registration takes an immediate write transaction around the
+  first-account decision and insert, so only one concurrent request can use the
+  invite-free bootstrap path.
   The backup command holds SQLite's writer reservation while copying the exact
   referenced upload set; manifests bind database and files with SHA-256, and
   restore validates everything before taking an exclusive offline lock.
+  Encrypted backups are atomic AES-256-GCM files: authentication is checked
+  before archive extraction, path/link/device entries are rejected, and
+  plaintext staging stays on the already-plaintext application data volume.
 - The supported container runs without root or Linux capabilities, with a
-  read-only application filesystem and no published application port. The
-  included Caddy proxy terminates HTTPS, replaces forwarding metadata, bounds
-  request size, and discards access/runtime logs.
+  read-only application filesystem, resource ceilings, an internal-only
+  application network, and no published application port. It cannot mount the
+  backup directory or encryption key. A separate networkless operator profile
+  alone receives those mounts. The included Caddy proxy terminates HTTPS,
+  replaces forwarding metadata, bounds request size, and discards access and
+  runtime logs.
 - Release assets receive signed GitHub/Sigstore provenance attestations.
   CodeQL and container scanning run on changes and weekly, and workflow Actions
   are pinned to immutable commit identifiers.
@@ -166,9 +190,10 @@ standard library also recommends salted, tunably slow password derivation:
 
 ## Known gaps
 
-- The standard-library HTTP server has not undergone production hardening or an
-  independent security audit.
-- There is no multi-factor authentication, password reset, or invisible-mode
+- The Uvicorn adapter and application have not undergone an independent
+  security audit or penetration test.
+- Passkeys are available, but there is no policy that forces multi-factor
+  authentication, no password-reset service, recovery codes, or invisible-mode
   preference. Message deletion is joined by kick/ban and account deletion, but
   per-channel read restrictions, audit logs, and temporary moderation actions
   are not implemented yet.
@@ -184,7 +209,10 @@ standard library also recommends salted, tunably slow password derivation:
   per-account storage quotas are not implemented. Signature checks are useful
   defence in depth, not proof that an image is harmless.
 - The in-memory limiter resets on restart and is not shared across processes.
-- SQLite backups are not automatically encrypted.
+- Encrypted backups protect the completed archive, not the live database. An
+  operator who can read the live volume or the separately held backup key can
+  still read their contents. Losing that key makes encrypted backups
+  unrecoverable; no copy is stored in the database.
 
 The included public deployment reduces avoidable exposure; it is not an
 independent security review or a guarantee that the application has no defects.

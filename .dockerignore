@@ -7,8 +7,8 @@ __pycache__
 .venv
 data
 backups
+secrets
 .env
 .DS_Store
 tests
 docs
-

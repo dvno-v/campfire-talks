@@ -12,6 +12,7 @@ saying both is how an operator finds out when they do not.
 
 import os
 import shutil
+import time
 
 
 def tracked_bytes(database):
@@ -31,6 +32,64 @@ def exceeds_limit(database, limit_bytes, incoming_bytes):
     if not limit_bytes:
         return False
     return tracked_bytes(database)[0] + incoming_bytes > limit_bytes
+
+
+def _reserved_bytes(database):
+    return database.execute(
+        "SELECT COALESCE(SUM(byte_size),0) FROM upload_reservations"
+    ).fetchone()[0]
+
+
+def reserve_upload(database, token, limit_bytes, incoming_bytes, timestamp=None, lifetime=900):
+    """Atomically reserve declared capacity for one in-flight upload."""
+    if not limit_bytes:
+        return True
+    timestamp = int(time.time() if timestamp is None else timestamp)
+    database.commit()
+    database.execute("BEGIN IMMEDIATE")
+    try:
+        database.execute("DELETE FROM upload_reservations WHERE expires_at<=?", (timestamp,))
+        if tracked_bytes(database)[0] + _reserved_bytes(database) + incoming_bytes > limit_bytes:
+            database.rollback()
+            return False
+        database.execute(
+            "INSERT INTO upload_reservations(token,byte_size,expires_at) VALUES(?,?,?)",
+            (token, incoming_bytes, timestamp + lifetime),
+        )
+        database.commit()
+        return True
+    except Exception:
+        database.rollback()
+        raise
+
+
+def begin_reserved_upload_write(database, token, limit_bytes, stored_bytes, timestamp=None):
+    """Consume one reservation and leave an immediate transaction open.
+
+    The caller writes the attachment and message rows in this same transaction.
+    A missing/expired reservation is accepted only if capacity remains after
+    accounting for every other active reservation.
+    """
+    timestamp = int(time.time() if timestamp is None else timestamp)
+    database.commit()
+    database.execute("BEGIN IMMEDIATE")
+    database.execute("DELETE FROM upload_reservations WHERE expires_at<=?", (timestamp,))
+    reservation = database.execute(
+        "SELECT byte_size FROM upload_reservations WHERE token=?", (token,)
+    ).fetchone()
+    if reservation:
+        if stored_bytes > reservation["byte_size"]:
+            return False
+        database.execute("DELETE FROM upload_reservations WHERE token=?", (token,))
+        return True
+    if limit_bytes and tracked_bytes(database)[0] + _reserved_bytes(database) + stored_bytes > limit_bytes:
+        return False
+    return True
+
+
+def release_upload(database, token):
+    """Release a failed upload's capacity reservation."""
+    database.execute("DELETE FROM upload_reservations WHERE token=?", (token,))
 
 
 def usage(database, actor_id, limit_bytes, stored_bytes=None):

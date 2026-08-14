@@ -56,6 +56,55 @@ characters.
 {"username": "sam", "password": "a long unique passphrase"}
 ```
 
+### `POST /api/passkeys/login/options`
+
+```json
+{"username": "sam"}
+```
+
+Returns a random opaque `ceremony` token and browser-ready WebAuthn `options`.
+Unknown users and users without a passkey receive the same shaped response with
+an unusable random credential ID. The ceremony expires after five minutes and
+can be consumed only once.
+
+### `POST /api/passkeys/login/verify`
+
+Accepts the `ceremony` and the serialized `PublicKeyCredential` returned by
+`navigator.credentials.get()`. Verification requires the exact configured
+origin/relying-party ID and authenticator user verification. Success creates
+the same private server-side session as password sign-in; failures are generic.
+
+### `GET /api/passkeys`
+
+Returns the signed-in caller's credential inventory: database ID, chosen name,
+creation time, and last-used time. Credential public keys and IDs are not
+returned.
+
+### `POST /api/passkeys/register/options`
+
+```json
+{"current_password": "the current passphrase"}
+```
+
+Requires a signed-in session and current-password confirmation, then returns a
+one-time `ceremony` and browser-ready options for
+`navigator.credentials.create()`.
+
+### `POST /api/passkeys/register/verify`
+
+Accepts `ceremony`, a 1–64 character `name`, and the serialized registration
+credential. A verified unique public credential is added to the caller's
+account; no biometric or authenticator secret is sent to Campfire.
+
+### `DELETE /api/passkeys/{passkey_id}`
+
+```json
+{"current_password": "the current passphrase"}
+```
+
+Requires current-password confirmation and removes only a passkey belonging to
+the caller.
+
 ### `POST /api/logout`
 
 Deletes the current server-side session and expires the browser cookie.
@@ -96,7 +145,7 @@ about two seconds; that browser returns to sign-in when it detects the loss.
 Returns everything stored about the caller as one JSON document, served with a
 `Content-Disposition` filename so a browser saves it. It carries the account
 row without its password hash, session creation and expiry times without their
-digests, community memberships and roles, every message the caller wrote with
+digests, passkey names/timestamps without credential material, community memberships and roles, every message the caller wrote with
 its community and channel name, uploaded image metadata, read markers,
 notification preferences, invites created, and bans received. It never contains
 another account's messages or anything the caller could not already see. The

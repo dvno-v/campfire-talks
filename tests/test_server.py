@@ -2,9 +2,11 @@ import os
 import sqlite3
 import stat
 import tempfile
+import threading
 import time
 import unittest
 import zlib
+from contextlib import closing
 from ipaddress import ip_network
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,11 +25,15 @@ from campfire.services.communities import list_community_bans, list_community_me
 from campfire.services.communities import revoke_invite, set_member_role, shares_community, unban_member
 from campfire.services.messages import apply_edit, may_delete, may_edit, remove_message, visible_message
 from campfire.services.retention import purge_expired, set_retention
-from campfire.services.storage import capacity_warnings, exceeds_limit, filesystems_have_space
+from campfire.services.storage import begin_reserved_upload_write, capacity_warnings, exceeds_limit
+from campfire.services.storage import filesystems_have_space, release_upload, reserve_upload
 from campfire.services.storage import tracked_bytes
 from campfire.services.storage import usage as storage_usage, writable_location
 from campfire.services.notifications import account_mode, channel_states, mark_community_read, mark_read
 from campfire.services.notifications import set_account_mode, set_channel_mode
+from campfire.services.passkeys import PasskeyError, authenticate_passkey, authentication_options
+from campfire.services.passkeys import list_passkeys, register_passkey, registration_options
+from campfire.services.passkeys import remove_passkey
 
 
 def png_chunk(kind, payload):
@@ -75,12 +81,59 @@ class CampfireTests(unittest.TestCase):
         self.assertTrue(security.password_matches("correct horse battery staple", encoded))
         self.assertFalse(security.password_matches("wrong password", encoded))
 
+    def test_passkey_ceremonies_are_verified_one_time_and_inventory_is_private_metadata(self):
+        username = f"passkey_service_{time.time_ns()}"
+        with database.connect() as db:
+            user_id = db.execute(
+                "INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                (username, security.password_hash("passkey test password"),
+                 database.utc_now())).lastrowid
+            ceremony, options = registration_options(
+                db, user_id, "passkey test password", "example.test")
+            self.assertEqual(options["rp"]["id"], "example.test")
+            verified = SimpleNamespace(
+                credential_id=b"credential-id", credential_public_key=b"public-key", sign_count=3)
+            with patch("campfire.services.passkeys.verify_registration_response",
+                       return_value=verified):
+                stored = register_passkey(
+                    db, user_id, ceremony, {"id": "ignored"}, "Laptop",
+                    "example.test", "https://example.test")
+            self.assertEqual(stored["name"], "Laptop")
+            self.assertEqual([entry["name"] for entry in list_passkeys(db, user_id)], ["Laptop"])
+            with self.assertRaises(PasskeyError):
+                register_passkey(db, user_id, ceremony, {"id": "ignored"}, "Again",
+                                 "example.test", "https://example.test")
+
+            login_ceremony, login_options = authentication_options(
+                db, username, "example.test")
+            self.assertEqual(len(login_options["allowCredentials"]), 1)
+            authenticated = SimpleNamespace(new_sign_count=4)
+            with patch("campfire.services.passkeys.base64url_to_bytes",
+                       return_value=b"credential-id"), patch(
+                           "campfire.services.passkeys.verify_authentication_response",
+                           return_value=authenticated):
+                user = authenticate_passkey(
+                    db, login_ceremony, {"id": "credential"},
+                    "example.test", "https://example.test")
+            self.assertEqual(user["id"], user_id)
+            self.assertTrue(remove_passkey(db, user_id, stored["id"], "passkey test password"))
+
+    def test_unknown_passkey_account_gets_indistinguishable_fake_options(self):
+        with database.connect() as db:
+            ceremony, options = authentication_options(
+                db, f"missing_{time.time_ns()}", "example.test")
+            row = db.execute("SELECT user_id FROM webauthn_challenges WHERE token_hash=?",
+                             (security.session_hash(ceremony),)).fetchone()
+        self.assertIsNone(row["user_id"])
+        self.assertEqual(len(options["allowCredentials"]), 1)
+
     def test_schema_and_relations(self):
         with database.connect() as db:
             names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"users", "sessions", "communities", "memberships", "channels", "messages",
                          "invitations", "attachments", "channel_reads", "notification_preferences",
-                         "channel_notifications", "community_bans", "schema_migrations"} <= names)
+                         "channel_notifications", "community_bans", "schema_migrations",
+                         "upload_reservations", "passkeys", "webauthn_challenges"} <= names)
         with database.connect() as db:
             message_columns = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
             membership_columns = {row[1] for row in db.execute("PRAGMA table_info(memberships)")}
@@ -90,7 +143,7 @@ class CampfireTests(unittest.TestCase):
         self.assertIn("created_at", session_columns)
         self.assertIn("id", session_columns)
         with database.connect() as db:
-            self.assertEqual(database.schema_version(db), 2)
+            self.assertEqual(database.schema_version(db), 3)
 
     def test_existing_memberships_are_migrated_to_member_role(self):
         original_path = database.DB_PATH
@@ -491,10 +544,11 @@ class CampfireTests(unittest.TestCase):
             self.assertIsNone(storage_usage(db, actors["member"], 0),
                               "disk usage is an operator's concern, not every member's")
             self.assertIsNone(storage_usage(db, actors["moderator"], 0))
-            report = storage_usage(db, actors["administrator"], 10_000, stored_bytes=4096)
+            limit = total + 10_000
+            report = storage_usage(db, actors["administrator"], limit, stored_bytes=4096)
             mine = [entry for entry in report["communities"] if entry["id"] == community_id]
-        self.assertEqual(report["limit_bytes"], 10_000)
-        self.assertEqual(report["available_bytes"], 10_000 - total)
+        self.assertEqual(report["limit_bytes"], limit)
+        self.assertEqual(report["available_bytes"], 10_000)
         self.assertEqual(report["stored_bytes"], 4096)
         self.assertEqual(report["files"], files)
         self.assertEqual([(entry["bytes"], entry["files"]) for entry in mine], [(3500, 2)])
@@ -512,6 +566,33 @@ class CampfireTests(unittest.TestCase):
                              "a limit of zero is no limit, which is the default")
             self.assertFalse(exceeds_limit(db, used + 100, 100))
             self.assertTrue(exceeds_limit(db, used + 100, 101))
+
+    def test_concurrent_uploads_reserve_capacity_before_receiving_bytes(self):
+        with database.connect() as db:
+            used = tracked_bytes(db)[0]
+        barrier = threading.Barrier(2)
+        results = []
+
+        def reserve(token):
+            with database.connect() as connection:
+                barrier.wait()
+                results.append((token, reserve_upload(
+                    connection, token, used + 100, 60, timestamp=100)))
+
+        threads = [threading.Thread(target=reserve, args=(token,))
+                   for token in ("first", "second")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+        self.assertEqual(sum(accepted for _, accepted in results), 1)
+        winner = next(token for token, accepted in results if accepted)
+        with database.connect() as db:
+            self.assertTrue(begin_reserved_upload_write(
+                db, winner, used + 100, 50, timestamp=101))
+        with database.connect() as db:
+            self.assertIsNone(db.execute(
+                "SELECT 1 FROM upload_reservations WHERE token=?", (winner,)).fetchone())
 
     def test_capacity_warnings_cover_the_image_limit_and_shared_filesystems(self):
         with tempfile.TemporaryDirectory() as folder, database.connect() as db:
@@ -1013,13 +1094,24 @@ class CampfireTests(unittest.TestCase):
         limiter.allow("login:later", timestamp=200)
         self.assertEqual(set(limiter._entries), {"login:later"})
 
+    def test_rate_limiter_has_hard_entry_and_key_size_bounds(self):
+        limiter = security.RateLimiter(attempts=2, window=60, max_entries=3, max_key_bytes=16)
+        self.assertTrue(limiter.allow("one", timestamp=100))
+        self.assertTrue(limiter.allow("two", timestamp=100))
+        self.assertTrue(limiter.allow("three", timestamp=100))
+        self.assertFalse(limiter.allow("four", timestamp=100))
+        self.assertFalse(limiter.allow("x" * 17, timestamp=100))
+        self.assertEqual(len(limiter._entries), 3)
+        self.assertTrue(limiter.allow("later", timestamp=200))
+        self.assertEqual(set(limiter._entries), {"later"})
+
     def test_startup_refuses_usernames_that_differ_only_by_case(self):
-        memory = sqlite3.connect(":memory:")
-        memory.row_factory = sqlite3.Row
-        memory.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)")
-        memory.execute("INSERT INTO users(username) VALUES('Sam'),('sam')")
-        with self.assertRaises(RuntimeError) as failure:
-            database.enforce_username_case_uniqueness(memory)
+        with closing(sqlite3.connect(":memory:")) as memory:
+            memory.row_factory = sqlite3.Row
+            memory.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL)")
+            memory.execute("INSERT INTO users(username) VALUES('Sam'),('sam')")
+            with self.assertRaises(RuntimeError) as failure:
+                database.enforce_username_case_uniqueness(memory)
         self.assertIn("Sam", str(failure.exception))
 
     def unread_fixture(self, db, label, messages=3):

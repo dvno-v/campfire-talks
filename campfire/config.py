@@ -67,11 +67,14 @@ PORT = _integer("CAMPFIRE_PORT", 8000, 1, 65535)
 # Empty by default: forwarded client addresses are trusted only where an
 # operator has named the proxy that sets them.
 TRUSTED_PROXIES = _networks(os.environ.get("CAMPFIRE_TRUSTED_PROXIES", ""))
-MAX_EVENT_STREAMS = _integer("CAMPFIRE_MAX_EVENT_STREAMS", 200, 1)
+MAX_EVENT_STREAMS = _integer("CAMPFIRE_MAX_EVENT_STREAMS", 32, 1)
 # Retention is measured in days, so sweeping hourly is prompt enough while
 # keeping the work off the request path entirely.
 RETENTION_SWEEP_SECONDS = _integer("CAMPFIRE_RETENTION_SWEEP_SECONDS", 3600, 60)
-MAX_EVENT_STREAMS_PER_USER = _integer("CAMPFIRE_MAX_EVENT_STREAMS_PER_USER", 8, 1)
+MAX_EVENT_STREAMS_PER_USER = _integer("CAMPFIRE_MAX_EVENT_STREAMS_PER_USER", 4, 1)
+MAX_CONCURRENT_REQUESTS = _integer("CAMPFIRE_MAX_CONCURRENT_REQUESTS", 64, 4, 1024)
+REQUEST_WORKERS = _integer("CAMPFIRE_REQUEST_WORKERS", 64, 4, 1024)
+KEEPALIVE_TIMEOUT_SECONDS = _integer("CAMPFIRE_KEEPALIVE_TIMEOUT_SECONDS", 5, 1, 60)
 
 
 def _is_loopback(host):
@@ -123,6 +126,10 @@ def validate_configuration():
             errors.append("CAMPFIRE_MAX_STORAGE_BYTES must be set for a network-reachable listener")
     if MAX_EVENT_STREAMS_PER_USER > MAX_EVENT_STREAMS:
         errors.append("CAMPFIRE_MAX_EVENT_STREAMS_PER_USER cannot exceed CAMPFIRE_MAX_EVENT_STREAMS")
+    if MAX_EVENT_STREAMS >= REQUEST_WORKERS:
+        errors.append("CAMPFIRE_MAX_EVENT_STREAMS must leave at least one CAMPFIRE_REQUEST_WORKERS slot")
+    if REQUEST_WORKERS > MAX_CONCURRENT_REQUESTS:
+        errors.append("CAMPFIRE_REQUEST_WORKERS cannot exceed CAMPFIRE_MAX_CONCURRENT_REQUESTS")
     if errors:
         raise ConfigError("Unsafe Campfire configuration:\n- " + "\n- ".join(errors))
     return True

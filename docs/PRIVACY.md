@@ -9,6 +9,8 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | --- | --- | --- |
 | Username and password hash | Authentication | Until manually deleted |
 | Session-token digest, user link, creation time, and expiry | Staying signed in and showing active sessions | 30 days; revoked rows are deleted immediately and expired rows at startup |
+| Passkey credential ID, public key, sign count, chosen name, and timestamps | WebAuthn sign-in and credential management | Until the passkey or account is deleted |
+| WebAuthn challenge, random ceremony-token digest, purpose, and expiry | Binding one browser ceremony to one request | 5 minutes at most; deleted when consumed or expired |
 | Communities, memberships, and roles | Authorization | Until manually deleted |
 | Community bans (account, prior role, moderator, time) | Preventing invite re-entry | Until unbanned or the account/community is deleted |
 | Channel messages | Conversation history | Indefinite by default, or the community's message retention window |
@@ -19,9 +21,11 @@ fonts, CDN scripts, telemetry endpoint, or third-party identity provider.
 | Read markers (one message id per account and channel) | Unread markers | Until the account or channel is deleted |
 | Notification modes (account default and per-channel) | User-chosen notification preferences | Until the account or channel is deleted |
 | Migration version, name, and application time | Safe reproducible upgrades | Lifetime of the database |
+| Random upload reservation token, declared byte count, and expiry | Atomic enforcement of the instance storage ceiling | Settled with the upload, or 15 minutes after interruption |
 | Empty process-lock files | Preventing concurrent servers and live restore | Lifetime of the database path |
 
-Raw passwords, raw session tokens, and raw invite codes are never stored.
+Raw passwords, raw session tokens, raw passkey ceremony tokens, authenticator
+private keys/biometrics, and raw invite codes are never stored.
 Campfire does not persist IP addresses, user agents, device names, locations,
 or session activity. Authentication rate-limit state exists only in memory for
 five minutes.
@@ -39,15 +43,23 @@ earlier timestamp was stored. The release that gave sessions a stable
 identifier rebuilds the table in place and carries the tokens across, so
 upgrading does not sign anyone out.
 
+A passkey's public credential lets the server verify signatures; the private
+key and any fingerprint/face/PIN check remain with the authenticator. Campfire
+stores the chosen label and last successful use so the account can recognize
+and remove credentials. Registration/removal requires the password, which
+remains the recovery method. A consumed challenge row is deleted whether the
+verification succeeds or fails, preventing replay.
+
 An account can download everything Campfire stores about it as a single JSON
 file: the account row without its password hash, when each session began and
 expires without its digest, memberships and roles, every message it wrote,
-image metadata, read markers, notification preferences, invites it created, and
+image metadata, passkey names and timestamps without credential material, read markers, notification preferences, invites it created, and
 bans it received. The file is plain text and depends on nothing Campfire hosts,
 so leaving does not mean losing your own history. It contains no one else's
 messages and nothing the account could not already see in the interface.
 
-Deleting an account erases the account row, its sessions, memberships, read
+Deleting an account erases the account row, its sessions, passkeys and active
+passkey challenges, memberships, read
 markers, notification preferences, and the invites it created, along with every
 message it wrote and every image it uploaded — in all communities, including
 any that had removed it. Stored image files are unlinked from disk, not merely
@@ -121,8 +133,10 @@ referenced image. Its manifest adds the Campfire/schema versions, creation time,
 random storage filenames, byte sizes, and SHA-256 content hashes so corruption
 or a mismatched file set can be detected. It adds no member-facing history, but
 it retains deleted or changed data until the operator's backup rotation removes
-that snapshot. Backups are plain files unless the operator encrypts the storage;
-they require the same access restrictions as the live database.
+that snapshot. The supplied Compose workflow writes the completed snapshot as
+one authenticated AES-256-GCM file. Its separate raw key is never mounted into
+the web container; whoever holds that key can decrypt all retained content, and
+losing it makes the snapshot unrecoverable.
 
 A community may set how long it keeps messages and how long it keeps shared
 images, in whole days. Both default to keeping everything, so an instance that
