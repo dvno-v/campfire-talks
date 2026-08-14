@@ -219,7 +219,7 @@ trusted network.
 | `CAMPFIRE_VOICE_LEASE_SECONDS` | `45` | Failed-client room-place expiry |
 
 ```bash
-CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db python3 -m campfire serve
+CAMPFIRE_PORT=9000 CAMPFIRE_DB=/srv/campfire.db .venv/bin/python -m campfire serve
 ```
 
 `CAMPFIRE_ORIGIN` and `CAMPFIRE_TRUSTED_PROXIES` are security-sensitive. The
@@ -234,8 +234,13 @@ backup/restore commands for native use, and `backup-encrypted`,
 ## Test it
 
 ```bash
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
+
+Run it with the virtual environment created above, not a bare `python3`. The
+system interpreter lacks the pinned dependencies, so the modules that import
+passkey support fail to load and the run reports a much smaller suite that still
+ends in `OK`.
 
 ## Documentation
 

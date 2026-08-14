@@ -93,7 +93,9 @@ Before releasing, you need:
 - permission to push tags and create releases in `dvno-v/campfire-talks`;
 - Git configured with your maintainer identity;
 - Python 3.14;
+- Node.js 24 for rebuilding the browser media client;
 - Docker Engine with the Compose plugin;
+- a Chromium-based browser for the media check in step 3;
 - the GitHub CLI (`gh`) for the independent verification commands; and
 - a clean local checkout whose `origin` points at the expected repository.
 
@@ -102,10 +104,24 @@ Check the tools:
 ```bash
 git --version
 python3 --version
+node --version
+npm --version
 docker --version
 docker compose version
 gh --version
 ```
+
+Campfire's runtime dependencies are pinned in `requirements.txt` and are not
+installed system-wide. Create the virtual environment the rest of this guide
+uses, matching the one in the [README](../README.md):
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+Every Python command below runs as `.venv/bin/python` deliberately. A bare
+`python3` uses the system interpreter, which does not have those dependencies.
 
 Authenticate the GitHub CLI if necessary:
 
@@ -168,7 +184,7 @@ clear upgrade/rollback explanation that generated notes would miss.
 Confirm the version Python sees:
 
 ```bash
-python3 -c 'from campfire import __version__; print(__version__)'
+.venv/bin/python -c 'from campfire import __version__; print(__version__)'
 ```
 
 It should print only the intended version, for example:
@@ -186,16 +202,32 @@ npm ci --ignore-scripts --no-audit --no-fund
 npm run build
 git diff --exit-code -- static/voice.js static/livekit-e2ee-worker.js
 npm audit --audit-level=high
-python3 -m unittest discover -s tests -v
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-The command must finish with `OK`. A skipped, interrupted, or partially run
-suite is not a passing suite.
+The `git diff --exit-code` line is the reason the rebuild comes first: the
+Docker image copies `static/`, never `frontend/`, so an unbuilt change to the
+media client would be released as the previous bundle without any other signal.
+
+The suite must finish with `OK`, and the reported test count must be the whole
+suite. A skipped, interrupted, or partially run suite is not a passing suite.
+
+Watch for this specific failure, which reports far fewer tests and still ends in
+a summary that can be mistaken for a smaller test surface:
+
+```text
+ModuleNotFoundError: No module named 'webauthn'
+```
+
+That means the tests ran under the system interpreter instead of `.venv`. The
+`test_deployment` and `test_operations` modules do not import `campfire.http`,
+so they pass, while every module that reaches the passkey code fails to import.
+Re-run with `.venv/bin/python`; do not treat the shorter run as a pass.
 
 Validate the safe private defaults:
 
 ```bash
-python3 -m campfire check-config
+.venv/bin/python -m campfire check-config
 ```
 
 Expected output:
@@ -223,7 +255,107 @@ domain or start a server; it only proves that Compose can render the model.
 If any check fails, fix it in the release branch, review the fix, and restart
 this step. Do not create a tag to see whether GitHub happens to pass.
 
-## Step 3: inspect exactly what will be released
+## Step 3: verify voice and screen sharing by hand
+
+No workflow starts a browser. The test suite covers the server, and the previous
+step only proves the media client compiles and matches its committed bundle.
+Nothing so far has established that a person can join a call, hear another
+person, or share a screen. Run this step for any release that touches
+`frontend/`, `static/`, `campfire/realtime.py`, the voice endpoints, or the
+LiveKit pins in `compose.yaml`, `compose.local.yaml`, or `deploy/`.
+
+Create the shared API mapping once. `secrets/livekit-keys.yaml` must be a
+regular file before anything starts:
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 700 secrets
+openssl rand -hex 32 | sed 's/^/campfire-media: /' | sudo tee secrets/livekit-keys.yaml >/dev/null
+sudo chown 10001:10001 secrets/livekit-keys.yaml
+sudo chmod 600 secrets/livekit-keys.yaml
+```
+
+Confirm the type and mode before continuing:
+
+```bash
+sudo stat -c '%A %U:%G %F %n' secrets secrets/livekit-keys.yaml
+```
+
+Expect a `directory` and a `regular file` with mode `-rw-------`. If the second
+line says `directory`, a previous Compose run created it: Docker creates a
+directory for any bind-mount source that does not exist. Remove it with `sudo rm
+-rf secrets/livekit-keys.yaml` and repeat the commands above. LiveKit rejects
+the leftover directory with `key file others permissions must be set to 0`, and
+Campfire reports `CAMPFIRE_LIVEKIT_API_SECRET_FILE could not be read`. The
+owner shows as `UNKNOWN` when the host has no account for uid 10001, which is
+expected and not a problem.
+
+Start the standalone loopback profile. Use `--force-recreate` so a container
+built against an earlier state of that mount is replaced rather than restarted:
+
+```bash
+docker compose -f compose.local.yaml up --build --force-recreate -d
+docker compose -f compose.local.yaml ps
+docker compose -f compose.local.yaml logs --since 1m campfire livekit
+```
+
+Do not combine `compose.local.yaml` with the production `compose.yaml`. Confirm
+the server is ready and both media transports are listening:
+
+```bash
+curl -fsS http://127.0.0.1:8000/readyz && echo
+ss -ltn | grep -E ':(7880|7881|8000)'
+ss -lun | grep 7882
+```
+
+Open <http://127.0.0.1:8000> in two profiles of a Chromium-based browser:
+
+```bash
+chromium --user-data-dir=/tmp/campfire-a http://127.0.0.1:8000 &
+chromium --user-data-dir=/tmp/campfire-b http://127.0.0.1:8000 &
+```
+
+Use `127.0.0.1`, not `localhost`. `compose.local.yaml` sets `CAMPFIRE_ORIGIN` to
+the former, and the CSRF check compares the browser's `Origin` header against it
+exactly, so every write from `localhost` is refused with `Cross-origin request
+blocked`. The address is still a secure context, so screen capture works over
+plain HTTP.
+
+Register the first account, which needs no invite on an empty instance. Create a
+voice channel, then create an invite from the community settings and register
+the second account with it in the other profile. Then verify, in order:
+
+- a text message from each account appears in the other without a reload;
+- both accounts join the voice channel and hear each other;
+- **Mute** and **Deafen** take effect on the other side;
+- **Share screen** publishes video, and changing **Screen quality** re-publishes;
+- **Include shared application audio** delivers the shared tab's audio;
+- **Stop sharing**, and the browser's own share bar, both clear the frame; and
+- the second profile joins from the complete **Copy call link** value, including
+  the `#voice=...` fragment that carries the media key.
+
+The E2EE assertion is implicit: the client refuses to publish an unencrypted
+track, so a frame that renders at all was encrypted end to end.
+
+Two browser behaviours are expected and are not release defects. Firefox does
+not expose shared tab or application audio to a page, so its share-audio note
+appears and that one bullet cannot be checked there. Firefox also discards
+loopback ICE candidates by default, so a call fails with `could not establish pc
+connection` unless `media.peerconnection.ice.loopback` is set to `true` in
+`about:config`. Neither affects a hosted instance, which advertises a routable
+address. Check the release with Chromium and treat Firefox as an optional extra.
+
+Stop the profile when the checks pass:
+
+```bash
+docker compose -f compose.local.yaml down
+```
+
+This profile advertises only a loopback candidate and disables TURN. It proves
+signaling, encryption, publishing, and the interface. It proves nothing about
+NAT traversal, TURN relay, or TLS. Those need a real host and the field checks
+in the [media guide](MEDIA.md).
+
+## Step 4: inspect exactly what will be released
 
 Review all changes before the preparation commit is merged:
 
@@ -251,7 +383,7 @@ the ordinary way. The exact collaboration commands depend on the project's
 branch naming and review process; the important requirement is that release
 preparation reaches `main` through review rather than bypassing it.
 
-## Step 4: wait for automation on the candidate commit
+## Step 5: wait for automation on the candidate commit
 
 After the preparation pull request is merged, open the commit on GitHub and
 confirm that both normal workflows passed:
@@ -276,7 +408,7 @@ The GitHub web interface is often easier for checking that every job and step is
 green. Do not release while a relevant run is pending, cancelled, skipped, or
 red.
 
-## Step 5: synchronize and identify the exact commit
+## Step 6: synchronize and identify the exact commit
 
 Return to the local checkout and update `main` without creating an accidental
 merge commit:
@@ -296,7 +428,7 @@ Compare the commit ID from `git log -1` with the successful candidate commit on
 GitHub. They must be the same. Check the version again:
 
 ```bash
-python3 -c 'from campfire import __version__; print(__version__)'
+.venv/bin/python -c 'from campfire import __version__; print(__version__)'
 ```
 
 Also confirm the intended tag does not already exist locally or remotely. For a
@@ -310,7 +442,7 @@ git ls-remote --tags origin refs/tags/v0.3.0
 Both commands should produce no tag result. Release tags are permanent names;
 never reuse an existing version for different bytes.
 
-## Step 6: create the release tag locally
+## Step 7: create the release tag locally
 
 Create an annotated tag. Replace `0.3.0` in both places with the version printed
 by Python:
@@ -349,7 +481,7 @@ git tag --delete v0.3.0
 This is safe only before publishing. Recheck the exact tag name before entering
 the delete command.
 
-## Step 7: push only the tag
+## Step 8: push only the tag
 
 Pushing a `v*` tag starts the signed release workflow. This is the point at which
 the release name becomes public infrastructure, so pause and check the command:
@@ -365,7 +497,7 @@ Once a tag is pushed, do not move it, delete it, or reuse its version to hide a
 mistake. People may already have fetched it. If the tagged release is defective,
 fix the problem in a reviewed commit and publish a new patch version.
 
-## Step 8: watch the signed release workflow
+## Step 9: watch the signed release workflow
 
 Open the repository's **Actions** page and select **Signed release**. The run for
 the new tag performs these steps in order:
@@ -395,7 +527,7 @@ The workflow receives a short-lived GitHub token for release publication and an
 OIDC identity for provenance. No long-lived artifact-signing key is stored in
 repository secrets.
 
-## Step 9: inspect the GitHub release
+## Step 10: inspect the GitHub release
 
 Do not announce it yet. Open the release page and check:
 
@@ -414,7 +546,7 @@ If generated notes are incomplete, edit the release description to add context.
 Do not replace the archive or checksum asset under the same version. A release
 version should always identify one stable set of bytes.
 
-## Step 10: verify the published release independently
+## Step 11: verify the published release independently
 
 Verify the files downloaded from the public release, not files left in a local
 build directory. This tests the same distribution path a self-hoster uses.
@@ -484,7 +616,7 @@ Leave the temporary verification directory with `cd ..` when finished. You may
 then remove that local download when you no longer need it; this does not affect
 the release on GitHub.
 
-## Step 11: announce and monitor the release
+## Step 12: announce and monitor the release
 
 Only after the workflow and independent verification pass should the release be
 announced as available.
@@ -589,15 +721,24 @@ that Tests and Security scanning succeeded on the exact commit before tagging.
 
 ### Dependabot
 
-`.github/dependabot.yml` checks the npm lock, Docker image references, and GitHub
-Actions every week. Updates arrive as ordinary pull requests and must pass
+`.github/dependabot.yml` checks the npm lock, Python requirements, Docker image
+references, and GitHub Actions every week. Updates arrive as ordinary pull requests and must pass
 review and the same automation. Browser/build packages are exactly locked,
 GitHub Actions are pinned to immutable commit SHAs, and container base images
 are pinned to digests, so an upstream moving tag cannot silently change a build.
 
-Campfire currently has no third-party Python packages. If one is introduced, it
-must be pinned in a lock file, included in vulnerability automation and release
-review, and documented as a new persistent supply-chain surface.
+Campfire's third-party Python packages are exactly pinned in `requirements.txt`,
+which the release workflow installs before running the tagged test suite. They
+support passkeys, the ASGI server, and cryptography. Adding one is a persistent
+supply-chain decision: pin it to an exact version, bring it into vulnerability
+automation and release review, and record why the standard library was not
+enough.
+
+Dependabot watches `requirements.txt` through its `pip` ecosystem, grouped as
+`python-runtime`, so these pins arrive as ordinary weekly pull requests like the
+others. Trivy independently scans the built image, which covers the same
+packages once installed. The two are complementary: Dependabot proposes the
+upgrade, Trivy fails the build for a known vulnerable one that nobody upgraded.
 
 ## Troubleshooting failed releases
 
@@ -688,8 +829,11 @@ Use this as a last review, not as a replacement for the detailed steps:
 
 - [ ] Version chosen and updated in `campfire/__init__.py`.
 - [ ] User, operator, security, and privacy documentation reviewed.
-- [ ] Full local tests passed.
+- [ ] Media client rebuilt and its committed bundle unchanged.
+- [ ] Full local tests passed under `.venv`, with the whole suite reported.
 - [ ] Configuration validation passed.
+- [ ] Voice, screen share, and shared audio checked by hand in a browser.
+- [ ] Open Dependabot pull requests triaged, including Python pins.
 - [ ] Candidate container built locally.
 - [ ] Compose model rendered successfully.
 - [ ] Release preparation merged through review.
