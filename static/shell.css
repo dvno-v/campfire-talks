@@ -462,3 +462,44 @@
   color: #f4c36a;
   font-weight: 600;
 }
+
+/* ---------- Keyboard and motion ---------------------------------------- */
+
+/* Every control has to show where the keyboard is. `:focus-visible` rather
+   than `:focus` so a pointer click does not leave a ring behind it. */
+:focus-visible {
+  outline: 2px solid var(--accent2);
+  outline-offset: 2px;
+}
+
+.channel:focus-visible,
+.community-icon:focus-visible,
+.row-menu-trigger:focus-visible {
+  outline-offset: -2px;
+}
+
+/* A trigger that hides until hover must reappear for the keyboard, or its row
+   becomes unreachable without a mouse. */
+.row-menu-trigger:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Nobody should have to hunt for the caret in the composer. */
+#message:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Motion here is decoration: the toast slide, the menu fade, the channel
+   highlight. Somebody who has asked for less of it loses nothing by having
+   none. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: .01ms !important;
+  }
+}

@@ -41,11 +41,37 @@ def _executor_for(loop):
 
 
 class _ResponseBridge:
-    """Apply bounded backpressure between a handler thread and ASGI."""
+    """Apply bounded backpressure between a handler thread and ASGI.
 
-    def __init__(self):
+    The handler runs in a worker thread and the sender runs on the event loop,
+    so the queue needs a wake-up the loop can wait on. An event stream stays
+    open for hours while producing almost nothing, and polling it would cost a
+    timer wake-up per stream several times a second for its whole life.
+    """
+
+    def __init__(self, loop):
         self.items = queue.Queue(maxsize=16)
         self.disconnected = threading.Event()
+        self._loop = loop
+        self._ready = asyncio.Event()
+
+    def _wake(self):
+        """Signal the loop's event from a handler thread."""
+        try:
+            self._loop.call_soon_threadsafe(self._ready.set)
+        except RuntimeError:
+            # The loop is already closing; nothing is left to wake.
+            pass
+
+    async def wait(self):
+        """Block until at least one item may be waiting.
+
+        Cleared before the caller drains, so an item queued during the drain
+        leaves the event set and the next wait returns immediately rather than
+        stranding a response.
+        """
+        await self._ready.wait()
+        self._ready.clear()
 
     def put(self, item):
         if self.disconnected.is_set() and item[0] == "body":
@@ -53,6 +79,7 @@ class _ResponseBridge:
         while True:
             try:
                 self.items.put(item, timeout=1)
+                self._wake()
                 return
             except queue.Full:
                 pass
@@ -191,7 +218,7 @@ async def application(scope, receive, send):
         return
 
     loop = asyncio.get_running_loop()
-    output = _ResponseBridge()
+    output = _ResponseBridge(loop)
     request = ASGIRequest(scope, body, output)
     future = _executor_for(loop).submit(_run_request, request, output)
     response_started = False
@@ -205,41 +232,43 @@ async def application(scope, receive, send):
                 return
 
     watcher = asyncio.create_task(watch_disconnect())
+    finished = False
     try:
-        while True:
-            try:
-                item = output.items.get_nowait()
-            except queue.Empty:
-                await asyncio.sleep(0.01)
-                continue
-            kind = item[0]
-            if kind == "start":
-                response_started = True
-                headers = [(name.lower().encode("latin-1"), value.encode("latin-1"))
-                           for name, value in item[2]]
+        while not finished:
+            await output.wait()
+            while not finished:
                 try:
-                    await send({"type": "http.response.start", "status": int(item[1]),
-                                "headers": headers})
-                except Exception:  # client transport is already gone
-                    send_failed = True
-                    output.disconnected.set()
-            elif kind == "body":
-                if not send_failed:
+                    item = output.items.get_nowait()
+                except queue.Empty:
+                    break
+                kind = item[0]
+                if kind == "start":
+                    response_started = True
+                    headers = [(name.lower().encode("latin-1"), value.encode("latin-1"))
+                               for name, value in item[2]]
                     try:
-                        await send({"type": "http.response.body", "body": item[1],
-                                    "more_body": True})
-                    except Exception:
+                        await send({"type": "http.response.start", "status": int(item[1]),
+                                    "headers": headers})
+                    except Exception:  # client transport is already gone
                         send_failed = True
                         output.disconnected.set()
-            elif kind == "done":
-                failure = item[1]
-                if failure and not response_started:
-                    await _send_error(send, HTTPStatus.INTERNAL_SERVER_ERROR,
-                                      "The request could not be completed")
-                    response_started = True
-                if response_started and not send_failed:
-                    await send({"type": "http.response.body", "body": b"", "more_body": False})
-                break
+                elif kind == "body":
+                    if not send_failed:
+                        try:
+                            await send({"type": "http.response.body", "body": item[1],
+                                        "more_body": True})
+                        except Exception:
+                            send_failed = True
+                            output.disconnected.set()
+                elif kind == "done":
+                    failure = item[1]
+                    if failure and not response_started:
+                        await _send_error(send, HTTPStatus.INTERNAL_SERVER_ERROR,
+                                          "The request could not be completed")
+                        response_started = True
+                    if response_started and not send_failed:
+                        await send({"type": "http.response.body", "body": b"", "more_body": False})
+                    finished = True
     finally:
         output.disconnected.set()
         watcher.cancel()

@@ -1,0 +1,102 @@
+name: Auto tag release
+
+# Tags a version bump only after both required workflows are green on the exact
+# commit, then starts the signed release. Both workflows run for every push to
+# master, so this fires twice per commit; whichever finishes second observes
+# both successes and does the work, and the tag-exists check makes a repeat
+# harmless. The branch filter must name this repository's default branch: a
+# `workflow_run` trigger matches the branch of the run that completed, so a
+# filter naming a branch nothing is pushed to never fires at all.
+
+on:
+  workflow_run:
+    workflows: ["Tests", "Security scanning"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Require both workflows green on this commit
+        id: checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          for workflow in test.yml security.yml; do
+            successes=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?head_sha=${HEAD_SHA}&event=push" \
+              --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+            if [ "$successes" -eq 0 ]; then
+              echo "::notice::${workflow} has no successful run for ${HEAD_SHA}; not tagging yet"
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Read the application version
+        id: version
+        if: steps.checks.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'from campfire import __version__; print(__version__)')
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::campfire.__version__ is not MAJOR.MINOR.PATCH: ${version}"; exit 1 ;;
+          esac
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when the tag already exists
+        id: existing
+        if: steps.version.outputs.tag != ''
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::${TAG} already exists; nothing to release"
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "create=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push the annotated tag
+        if: steps.existing.outputs.create == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "${TAG}" --message "Campfire ${TAG#v}" "${HEAD_SHA}"
+          git push origin "${TAG}"
+
+      # A tag pushed with GITHUB_TOKEN deliberately does not start another
+      # workflow, so the release is dispatched explicitly. workflow_dispatch is
+      # the documented exception to that rule and needs no long-lived token.
+      - name: Start the signed release
+        if: steps.existing.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh workflow run release.yml --ref "${TAG}"

@@ -48,12 +48,37 @@ class DeploymentTests(unittest.TestCase):
         caddyfile = self.read("deploy/Caddyfile")
         self.assertGreaterEqual(caddyfile.count("output discard"), 2)
         self.assertIn("header_up X-Forwarded-For {remote_host}", caddyfile)
-        self.assertIn("max_size 9MB", caddyfile)
+        self.assertRegex(caddyfile, r"max_size \{\$CAMPFIRE_MAX_REQUEST_BODY:\d+MB\}")
         self.assertIn("read_header 5s", caddyfile)
         self.assertIn("read_body 2m", caddyfile)
         self.assertIn("max_header_size 32KB", caddyfile)
         self.assertIn("unhealthy_request_count 64", caddyfile)
         self.assertNotIn("flush_interval -1", caddyfile)
+
+    def test_the_proxy_and_application_upload_ceilings_are_set_together(self):
+        """Caddy refuses an oversized body before Campfire sees it, so a proxy
+        ceiling at or below the application's rejects uploads with an error
+        Campfire never wrote. The defaults must not be able to drift apart."""
+        proxy_default = int(re.search(
+            r"max_size \{\$CAMPFIRE_MAX_REQUEST_BODY:(\d+)MB\}",
+            self.read("deploy/Caddyfile")).group(1)) * 1_000_000
+        environment = self.read(".env.example")
+        application_default = int(re.search(
+            r"(?m)^CAMPFIRE_MAX_UPLOAD_BYTES=(\d+)$", environment).group(1))
+        self.assertGreater(proxy_default, application_default,
+                           "the proxy ceiling must leave room for request overhead")
+        self.assertRegex(environment, r"(?m)^CAMPFIRE_MAX_REQUEST_BODY=\d+MB$")
+
+        compose = self.read("compose.yaml")
+        self.assertIn("CAMPFIRE_MAX_UPLOAD_BYTES: ${CAMPFIRE_MAX_UPLOAD_BYTES:-", compose)
+        self.assertIn("CAMPFIRE_MAX_REQUEST_BODY: ${CAMPFIRE_MAX_REQUEST_BODY:-", compose)
+        # The proxy variable belongs to Caddy and the byte ceiling to Campfire;
+        # setting either on the wrong service silently stops bounding anything.
+        # Matched as an assignment so the cross-referencing comments do not count.
+        campfire_service, caddy_service = compose.split("  caddy:", 1)
+        self.assertNotRegex(campfire_service, r"(?m)^\s+CAMPFIRE_MAX_REQUEST_BODY:")
+        self.assertRegex(caddy_service, r"(?m)^\s+CAMPFIRE_MAX_REQUEST_BODY:")
+        self.assertNotRegex(caddy_service, r"(?m)^\s+CAMPFIRE_MAX_UPLOAD_BYTES:")
 
     def test_media_server_is_pinned_isolated_and_has_only_required_media_ports(self):
         compose = self.read("compose.yaml")

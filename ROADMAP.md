@@ -110,11 +110,23 @@ and evidence to record are in [docs/MEDIA.md](docs/MEDIA.md).
 
 ## Milestone 5 — Friend-group polish
 
-- Direct messages and small group chats
-- Emoji reactions, replies, search, and spoiler markup
-- Optional push notifications with an honest third-party metadata warning
-- Installable PWA and accessibility/keyboard review
-- Import/export format with no dependency on Campfire infrastructure
+Status: in progress
+
+- [x] Paged channel history, so a conversation past one page stays readable
+- [x] Campfire's own question and confirmation dialogs, replacing every
+      `window.prompt`/`confirm`/`alert`. A browser may suppress those, and an
+      invite code is shown exactly once
+- [x] Author grouping, day dividers, and a view that stays where it is being
+      read instead of following every arrival
+- [x] Keyboard focus states and `prefers-reduced-motion` throughout
+- [x] A live region on the message list, so an arriving message is announced
+- [ ] Direct messages and small group chats
+- [ ] Emoji reactions, replies, search, and spoiler markup
+- [ ] Optional push notifications with an honest third-party metadata warning
+- [ ] Installable PWA — needs a service worker, and therefore a decision about
+      what may be cached and how an upgrade invalidates it
+- [ ] A full screen-reader pass over the dialogs, member list, and voice dock
+- [ ] Import/export format with no dependency on Campfire infrastructure
 
 ## Security gate for every feature
 

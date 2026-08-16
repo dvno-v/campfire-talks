@@ -42,3 +42,123 @@
 .message-edit-actions button[data-cancel-edit]:hover {
   color: var(--ink);
 }
+
+/* The top of the list: either where the channel began, or the way back into
+   the rest of it. See `renderHistoryTop` in app.js. The wrapper is left
+   unstyled so the welcome block keeps the ordinary flow it had before; only
+   the button centres itself. */
+.load-earlier {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: block;
+  font-size: 13px;
+  margin: 0 auto 4px;
+  padding: 7px 16px;
+  transition: background .14s ease, color .14s ease, border-color .14s ease;
+}
+
+.load-earlier:hover:not(:disabled) {
+  background: #ffffff0b;
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.load-earlier:disabled {
+  cursor: default;
+  opacity: .6;
+}
+
+/* ---------- reading a conversation ------------------------------------ */
+
+/* Consecutive lines from one person are one thought. Only the first carries a
+   name and a face; the rest keep the gutter so the text stays in one column,
+   and trade the avatar for the time, on hover. */
+
+.message-row.grouped {
+  margin: 2px 0;
+}
+
+.message-row.grouped .message-meta {
+  display: none;
+}
+
+.message-row.grouped .message-avatar {
+  align-items: flex-start;
+  background: none;
+  border-radius: 0;
+  height: auto;
+  justify-content: flex-end;
+  padding-top: 3px;
+}
+
+.message-row.grouped .avatar-initials {
+  display: none;
+}
+
+.gutter-time {
+  color: #71727d;
+  display: none;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+
+.message-row.grouped:hover .gutter-time,
+.message-row.grouped:focus-within .gutter-time {
+  display: block;
+}
+
+/* The day a message was sent belongs above the day, not on every line. */
+.day-divider {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  margin: 26px 0 18px;
+}
+
+.day-divider::before,
+.day-divider::after {
+  background: var(--line);
+  content: '';
+  flex: 1;
+  height: 1px;
+}
+
+.day-divider span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* The way back down after reading history. Anchored to the conversation
+   column, above the composer. */
+.jump-latest {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  bottom: 84px;
+  box-shadow: 0 10px 28px #0007;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  left: 50%;
+  padding: 8px 16px;
+  position: absolute;
+  transform: translateX(-50%);
+  z-index: 5;
+}
+
+.jump-latest:hover {
+  border-color: var(--accent);
+}
+
+/* The jump control is positioned against the conversation column. Absolutely
+   positioned children are out of grid flow, so it takes no track of its own. */
+.chat {
+  position: relative;
+}

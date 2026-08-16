@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Started by the auto-tag workflow, which must dispatch because a tag pushed
+  # with GITHUB_TOKEN cannot trigger the push event above. Dispatch this only
+  # with a vX.Y.Z tag ref: the version check below fails closed on any other.
+  workflow_dispatch:
 
 permissions:
   contents: write

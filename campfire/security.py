@@ -72,6 +72,11 @@ AUTH_LIMITER = RateLimiter()
 # a substitute: an attacker must never allocate memory by inventing usernames.
 AUTH_IP_LIMITER = RateLimiter(attempts=30, window=300)
 UPLOAD_LIMITER = RateLimiter(attempts=20, window=60)
+# Slow mode is a community control: per-channel, off by default, and it exempts
+# the moderators. This is the different thing — a floor under every channel so a
+# runaway script or a stuck client cannot fill the disk while nobody is looking.
+# It is set well above conversational speed, so nobody typing ever meets it.
+MESSAGE_LIMITER = RateLimiter(attempts=40, window=60)
 # Token minting is cheap but writes a lease each time. A compromised member
 # must not be able to turn that narrow endpoint into an unbounded SQLite writer.
 MEDIA_TOKEN_LIMITER = RateLimiter(attempts=12, window=60)

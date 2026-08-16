@@ -33,7 +33,8 @@ from .instance_lock import operation_lock, server_lock
 from .migrations import LATEST_SCHEMA_VERSION
 from .realtime import BROKER
 from .security import AUTH_IP_LIMITER, AUTH_LIMITER, DUMMY_PASSWORD_HASH
-from .security import MEDIA_TOKEN_LIMITER, PASSWORD_ITERATIONS, UPLOAD_LIMITER, USERNAME_RE
+from .security import MEDIA_TOKEN_LIMITER, MESSAGE_LIMITER, PASSWORD_ITERATIONS
+from .security import UPLOAD_LIMITER, USERNAME_RE
 from .security import client_address, invite_hash, password_hash, password_matches
 from .security import session_hash, valid_invite
 from .services.accounts import change_password as change_account_password
@@ -64,6 +65,10 @@ from .uploads import detect_image_type, safe_original_name, strip_metadata
 
 KEEPALIVE_SECONDS = 20
 DISCONNECT_POLL_SECONDS = 2
+# One page of history. A channel holds more than this, so the response also says
+# whether older messages remain: a client that could not tell would have no
+# honest way to show the start of a channel apart from the middle of one.
+MESSAGE_PAGE_SIZE = 100
 
 # Static responses are loaded only from this explicit trusted manifest. Request
 # paths select an in-memory response; they are never joined to a filesystem path
@@ -72,6 +77,7 @@ _STATIC_MANIFEST = (
     ("/account.css", "account.css"),
     ("/app.js", "app.js"),
     ("/attachments.css", "attachments.css"),
+    ("/feedback.css", "feedback.css"),
     ("/index.html", "index.html"),
     ("/invites.css", "invites.css"),
     ("/layout.css", "layout.css"),
@@ -656,9 +662,15 @@ class App(BaseHTTPRequestHandler):
         self.send_json(report)
 
     def readiness(self):
-        """Report whether this process can serve Campfire without exposing internals."""
+        """Report whether this process can serve Campfire without exposing internals.
+
+        Readiness only, deliberately. This endpoint is unauthenticated and
+        reachable by anyone who can resolve the public name, so it answers the
+        one question a probe is entitled to ask. How full the instance is
+        describes the people using it, not whether it can serve, and it is
+        already reported to administrators through `/api/storage`.
+        """
         checks = {"database": "failed", "storage": "failed"}
-        warning_codes = []
         try:
             with closing(connect()) as database:
                 # Naming a required table catches an empty or wrong SQLite file;
@@ -666,9 +678,6 @@ class App(BaseHTTPRequestHandler):
                 database.execute("SELECT 1 FROM users LIMIT 1").fetchone()
                 if schema_version(database) == LATEST_SCHEMA_VERSION:
                     checks["database"] = "ok"
-                    warning_codes = [warning["code"] for warning in capacity_warnings(
-                        database, MAX_STORAGE_BYTES, UPLOAD_DIR, DB_PATH,
-                        STORAGE_WARNING_PERCENT)]
         except (OSError, sqlite3.Error):
             pass
         database_parent_writable = writable_location(DB_PATH.parent, directory=True)
@@ -677,11 +686,7 @@ class App(BaseHTTPRequestHandler):
                 and filesystems_have_space(DB_PATH, UPLOAD_DIR)):
             checks["storage"] = "ok"
         ready = all(value == "ok" for value in checks.values())
-        payload = {
-            "status": "ready" if ready else "not_ready",
-            "checks": checks,
-            "warnings": warning_codes,
-        }
+        payload = {"status": "ready" if ready else "not_ready", "checks": checks}
         self.send_json(payload, HTTPStatus.OK if ready else HTTPStatus.SERVICE_UNAVAILABLE,
                        None if ready else {"Retry-After": "5"})
 
@@ -769,6 +774,10 @@ class App(BaseHTTPRequestHandler):
                                          | self.channel_state_payload(states.get(row["channel_id"])))
         self.send_json({"user": user, "communities": list(communities.values()),
                         "notifications": {"default_mode": default_mode},
+                        # The client refuses an oversized image before spending
+                        # anyone's upload on it, so it has to be told the same
+                        # ceiling the server enforces rather than assume one.
+                        "limits": {"max_upload_bytes": MAX_UPLOAD_BYTES},
                         "media": {"enabled": bool(MEDIA_URL),
                                   "max_participants": MAX_VOICE_PARTICIPANTS}})
 
@@ -1161,22 +1170,42 @@ class App(BaseHTTPRequestHandler):
         except ValueError:
             return self.error(HTTPStatus.BAD_REQUEST, "Invalid channel")
         query = parse_qs(urlparse(self.path).query)
-        try:
-            after = max(0, int(query.get("after", [0])[0]))
-        except ValueError:
-            after = 0
+        after = self.message_bound(query, "after")
+        # `before` walks backwards through history a page at a time. Without it
+        # everything past the newest page is stored but unreachable: `after`
+        # only ever returns messages newer than one already in hand.
+        before = self.message_bound(query, "before")
+        conditions, parameters = ["m.channel_id=?", "m.id>?"], [channel_id, after]
+        if before:
+            conditions.append("m.id<?")
+            parameters.append(before)
         with connect() as db:
             channel = self.member_channel(db, channel_id, user["id"])
             if not channel:
                 return self.error(HTTPStatus.FORBIDDEN, "No access to this channel")
             if channel["kind"] != "text":
                 return self.error(HTTPStatus.CONFLICT, "Voice channels do not contain messages")
-            rows = db.execute("""SELECT m.id,m.channel_id,m.body,m.created_at,m.edited_at,m.attachment_id,
+            rows = db.execute(f"""SELECT m.id,m.channel_id,m.body,m.created_at,m.edited_at,m.attachment_id,
               u.id author_id,u.username,a.original_name,a.mime_type,a.byte_size
               FROM messages m JOIN users u ON u.id=m.author_id
               LEFT JOIN attachments a ON a.id=m.attachment_id
-              WHERE m.channel_id=? AND m.id>? ORDER BY m.id DESC LIMIT 100""", (channel_id, after)).fetchall()
-        self.send_json({"messages": [message_from_row(row) for row in reversed(rows)]})
+              WHERE {' AND '.join(conditions)} ORDER BY m.id DESC LIMIT ?""",
+              (*parameters, MESSAGE_PAGE_SIZE)).fetchall()
+            # Asked of the oldest row actually returned rather than inferred
+            # from a full page, so a channel holding exactly one page does not
+            # offer a button that would fetch nothing.
+            older = bool(rows) and db.execute(
+                "SELECT 1 FROM messages WHERE channel_id=? AND id<? LIMIT 1",
+                (channel_id, rows[-1]["id"])).fetchone() is not None
+        self.send_json({"messages": [message_from_row(row) for row in reversed(rows)],
+                        "has_more": older})
+
+    def message_bound(self, query, name):
+        """Read one non-negative message-id bound from the query string."""
+        try:
+            return max(0, int(query.get(name, [0])[0]))
+        except ValueError:
+            return 0
 
     def create_message(self, path):
         user = self.require_user()
@@ -1189,6 +1218,12 @@ class App(BaseHTTPRequestHandler):
         body = str(self.json_body().get("body", "")).strip()
         if not 1 <= len(body) <= 4000:
             return self.error(HTTPStatus.BAD_REQUEST, "Message must be 1–4000 characters")
+        # Charged after the body is validated and read, so a malformed request
+        # cannot spend somebody's allowance, and the connection stays framed.
+        if not MESSAGE_LIMITER.allow(f"user:{user['id']}"):
+            return self.error(HTTPStatus.TOO_MANY_REQUESTS,
+                              "You are sending messages faster than this instance accepts. "
+                              "Wait a moment and try again")
         created = utc_now()
         with connect() as db:
             context = channel_context(db, channel_id, user["id"])
@@ -1378,7 +1413,8 @@ class App(BaseHTTPRequestHandler):
                 return self.error(HTTPStatus.NOT_FOUND, "Message not found")
             if not may_delete(message):
                 return self.error(HTTPStatus.FORBIDDEN,
-                                  "Only the author or a community moderator can delete a message")
+                                  "Only the author, or a moderator ranked above them, "
+                                  "can delete a message")
             channel_id = message["channel_id"]
             orphaned_file = remove_message(db, message)
         if orphaned_file:
@@ -1503,11 +1539,19 @@ class App(BaseHTTPRequestHandler):
         if not attachment:
             return self.error(HTTPStatus.NOT_FOUND, "Attachment not found")
         source = UPLOAD_DIR / attachment["storage_name"]
-        if not source.is_file():
+        # Measure the file rather than trusting the recorded size. The body is
+        # streamed from disk, so a stored size that has drifted from the file
+        # would declare a length the response never sends and desynchronize a
+        # keep-alive connection.
+        try:
+            stored_size = source.stat().st_size if source.is_file() else None
+        except OSError:
+            stored_size = None
+        if stored_size is None:
             return self.error(HTTPStatus.GONE, "Attachment data is unavailable")
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", attachment["mime_type"])
-        self.send_header("Content-Length", str(attachment["byte_size"]))
+        self.send_header("Content-Length", str(stored_size))
         self.send_header("Content-Disposition", "inline")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

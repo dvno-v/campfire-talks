@@ -1069,6 +1069,46 @@ class CampfireTests(unittest.TestCase):
                            (role, community_id, actors["bystander"]))
                 self.assertEqual(may_delete(visible_message(db, message_id, actors["bystander"])), expected)
 
+    def test_message_moderation_obeys_the_hierarchy_kicks_and_bans_obey(self):
+        """Deleting somebody's words acts downwards, never sideways or up."""
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "delete_hierarchy")
+            community_id, channel_id = db.execute(
+                """SELECT ch.community_id,ch.id FROM messages m
+                   JOIN channels ch ON ch.id=m.channel_id WHERE m.id=?""",
+                (message_id,)).fetchone()
+            db.execute("UPDATE memberships SET role='moderator' WHERE community_id=? AND user_id=?",
+                       (community_id, actors["bystander"]))
+            owner_message = db.execute(
+                "INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                (channel_id, actors["owner"], "the owner speaking", database.utc_now())).lastrowid
+
+            self.assertFalse(may_delete(visible_message(db, owner_message, actors["bystander"])),
+                             "a moderator must not erase the community owner's words")
+            for author_role in ("administrator", "moderator"):
+                db.execute("UPDATE memberships SET role=? WHERE community_id=? AND user_id=?",
+                           (author_role, community_id, actors["author"]))
+                self.assertFalse(
+                    may_delete(visible_message(db, message_id, actors["bystander"])),
+                    f"a moderator must not erase a {author_role}'s words")
+            # Authorship and outranking both still work.
+            self.assertTrue(may_delete(visible_message(db, message_id, actors["author"])))
+            self.assertTrue(may_delete(visible_message(db, owner_message, actors["owner"])))
+
+    def test_a_removed_authors_messages_stay_moderatable(self):
+        """A kick takes the membership row with it; the words it left behind
+        must not become permanent."""
+        with database.connect() as db:
+            actors, message_id = self.message_fixture(db, "delete_removed_author")
+            community_id = db.execute("""SELECT ch.community_id FROM messages m
+                                          JOIN channels ch ON ch.id=m.channel_id WHERE m.id=?""",
+                                      (message_id,)).fetchone()[0]
+            db.execute("UPDATE memberships SET role='moderator' WHERE community_id=? AND user_id=?",
+                       (community_id, actors["bystander"]))
+            db.execute("DELETE FROM memberships WHERE community_id=? AND user_id=?",
+                       (community_id, actors["author"]))
+            self.assertTrue(may_delete(visible_message(db, message_id, actors["bystander"])))
+
     def test_messages_are_invisible_outside_their_community(self):
         with database.connect() as db:
             actors, message_id = self.message_fixture(db, "visibility")

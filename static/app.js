@@ -1,5 +1,6 @@
 const $ = (s) => document.querySelector(s);
-const state = { user: null, communities: [], community: null, channel: null, members: [], online: new Set(), messages: new Map(), eventSource: null, streamOpened: false, unread: new Map(), defaultMode: 'all', unreadBoundary: false };
+const DEFAULT_MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+const state = { user: null, communities: [], community: null, channel: null, members: [], online: new Set(), messages: new Map(), eventSource: null, streamOpened: false, unread: new Map(), defaultMode: 'all', unreadBoundary: false, maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES, olderMessages: false };
 let registering = false;
 
 async function api(path, options = {}) {
@@ -10,6 +11,102 @@ async function api(path, options = {}) {
 }
 
 function initials(name) { return name.slice(0, 2).toUpperCase(); }
+
+// ---------- Telling people things ----------
+// Campfire never uses alert/confirm/prompt. They block the page, they are
+// styled by the browser rather than by us, and — the reason that actually
+// matters — a browser may suppress them outright. An invite code is shown
+// exactly once, so a suppressed dialog is a code destroyed.
+
+const TOAST_SECONDS = { error: 8, good: 4, info: 5 };
+
+function showToast(message, tone = 'error') {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${tone}`;
+  toast.textContent = String(message ?? '');
+  const dismiss = document.createElement('button');
+  dismiss.type = 'button'; dismiss.className = 'toast-dismiss';
+  dismiss.setAttribute('aria-label', 'Dismiss'); dismiss.textContent = '×';
+  const remove = () => { toast.classList.add('leaving'); setTimeout(() => toast.remove(), 200); };
+  dismiss.onclick = remove;
+  toast.append(dismiss);
+  $('#toasts').append(toast);
+  setTimeout(remove, (TOAST_SECONDS[tone] || 5) * 1000);
+  // Three at a time is as many as anyone reads; older ones have had their turn.
+  const toasts = [...$('#toasts').children];
+  toasts.slice(0, Math.max(0, toasts.length - 3)).forEach(old => old.remove());
+  return toast;
+}
+// voice.js reports call failures through the same channel, and loads first.
+window.CampfireToast = showToast;
+
+let askResolve = null;
+function settleAsk(value) {
+  const resolve = askResolve; askResolve = null;
+  if ($('#ask-dialog').open) $('#ask-dialog').close();
+  resolve?.(value);
+}
+
+// Resolves with the trimmed text, or null if the person backed out — including
+// by pressing Escape, which closes a <dialog> without asking us first.
+function askText({ eyebrow = '', title, note = '', label, value = '', placeholder = '',
+                   maxLength = 120, submitLabel = 'Create' }) {
+  settleAsk(null);  // a previous question cannot be left hanging
+  $('#ask-eyebrow').textContent = eyebrow;
+  $('#ask-title').textContent = title;
+  $('#ask-note').textContent = note;
+  $('#ask-note').classList.toggle('hidden', !note);
+  $('#ask-label-text').textContent = label;
+  $('#ask-submit').textContent = submitLabel;
+  $('#ask-status').textContent = '';
+  const field = $('#ask-input');
+  field.value = value; field.placeholder = placeholder; field.maxLength = maxLength;
+  return new Promise(resolve => {
+    askResolve = resolve;
+    $('#ask-dialog').showModal();
+    field.focus(); field.select();
+  });
+}
+
+$('#ask-form').onsubmit = event => {
+  event.preventDefault();
+  const value = $('#ask-input').value.trim();
+  if (!value) { $('#ask-status').textContent = 'Enter something first.'; return; }
+  settleAsk(value);
+};
+$('#ask-cancel').onclick = () => settleAsk(null);
+$('#ask-close').onclick = () => settleAsk(null);
+$('#ask-dialog').addEventListener('close', () => settleAsk(null));
+
+let confirmResolve = null;
+function settleConfirm(accepted) {
+  const resolve = confirmResolve; confirmResolve = null;
+  if ($('#confirm-dialog').open) $('#confirm-dialog').close();
+  resolve?.(accepted);
+}
+
+function askConfirm({ eyebrow = 'Confirm', title, body = '', confirmLabel = 'Confirm', danger = false }) {
+  settleConfirm(false);
+  $('#confirm-eyebrow').textContent = eyebrow;
+  $('#confirm-title').textContent = title;
+  $('#confirm-body').textContent = body;
+  $('#confirm-body').classList.toggle('hidden', !body);
+  const accept = $('#confirm-accept');
+  accept.textContent = confirmLabel;
+  accept.classList.toggle('danger', danger);
+  accept.classList.toggle('primary', !danger);
+  return new Promise(resolve => {
+    confirmResolve = resolve;
+    $('#confirm-dialog').showModal();
+    // Focus lands on Cancel: the destructive choice should be chosen, not
+    // arrived at by pressing Enter out of habit.
+    $('#confirm-cancel').focus();
+  });
+}
+
+$('#confirm-accept').onclick = () => settleConfirm(true);
+$('#confirm-cancel').onclick = () => settleConfirm(false);
+$('#confirm-dialog').addEventListener('close', () => settleConfirm(false));
 const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 // Values are interpolated into attributes as well as text, so quotes must escape too.
 function escapeHTML(value) { return String(value ?? '').replace(/[&<>"']/g, (character) => HTML_ESCAPES[character]); }
@@ -33,6 +130,7 @@ async function enterApp() {
   const data = await api('/api/bootstrap');
   state.user = data.user; state.communities = data.communities;
   state.defaultMode = data.notifications?.default_mode || 'all';
+  state.maxUploadBytes = Number(data.limits?.max_upload_bytes) || DEFAULT_MAX_UPLOAD_BYTES;
   window.CampfireVoice?.configure(data.media);
   state.unread.clear();
   data.communities.forEach(community => community.channels.forEach(channel => rememberChannelState(channel.id, channel)));
@@ -370,9 +468,14 @@ function applyMemberJoined(event) {
 }
 
 function applyMemberUpdated(event) {
-  if (Number(event.id) === state.user?.id) setTimeout(applyChannelRules, 0);
   const community = state.communities.find(entry => entry.id === Number(event.community_id));
-  if (community && event.member.id === state.user?.id) community.role = event.member.role;
+  // Your own role decides what the composer and the channel gear offer, so a
+  // promotion or demotion has to reach them without waiting for a reload. The
+  // role is stored first: `applyChannelRules` reads it back.
+  if (community && event.member.id === state.user?.id) {
+    community.role = event.member.role;
+    if (community.id === state.community?.id) applyChannelRules();
+  }
   if (event.community_id !== state.community?.id) return;
   const existing = state.members.find(member => member.id === event.member.id);
   if (!existing) return loadMembers(event.community_id);
@@ -401,18 +504,20 @@ async function updateMemberRole(member, role) {
     const updated = await api(`/api/communities/${state.community.id}/members/${Number(member.id)}`, {
       method: 'PATCH', body: JSON.stringify({ role }) });
     applyMemberUpdated({ type: 'member.updated', community_id: state.community.id, member: updated });
-  } catch (error) { alert(error.message); renderMembers(); }
+  } catch (error) { showToast(error.message); renderMembers(); }
 }
 
 async function moderateMember(member, banned) {
   const consequence = banned ? ' They will not be able to rejoin until unbanned.' : '';
-  if (!confirm(`${banned ? 'Ban' : 'Kick'} ${member.username}?${consequence}`)) return;
+  if (!await askConfirm({ eyebrow: 'Moderation', title: `${banned ? 'Ban' : 'Kick'} ${member.username}?`,
+      body: `They lose access to ${state.community.name} immediately.${consequence}`,
+      confirmLabel: banned ? 'Ban' : 'Kick', danger: true })) return;
   try {
     const path = `/api/communities/${state.community.id}/members/${Number(member.id)}${banned ? '/ban' : ''}`;
     await api(path, { method: banned ? 'POST' : 'DELETE', ...(banned ? { body: '{}' } : {}) });
     applyMemberRemoved({ type: 'member.removed', community_id: state.community.id,
       user_id: member.id, banned });
-  } catch (error) { alert(error.message); }
+  } catch (error) { showToast(error.message); }
 }
 
 // Re-reads the channel outright: a gap can hide edits and deletions too, not
@@ -442,6 +547,7 @@ function applyChannelRules() {
   const channel = state.channel;
   $('#channel-settings').classList.toggle('hidden',
     !channel || !['owner', 'administrator'].includes(currentCommunityRole()));
+  renderChannelTopic(channel);
   if (!channel) return;
   const allowed = roleRank(currentCommunityRole()) >= roleRank(channel.post_min_role || 'member');
   const slow = Number(channel.slow_mode_seconds) || 0;
@@ -450,6 +556,23 @@ function applyChannelRules() {
   $('#message').placeholder = allowed
     ? (slow ? `Message #${channel.name} — slow mode, ${slowModeLabel(slow)}` : `Message #${channel.name}`)
     : `Only ${channel.post_min_role}s and above can post here`;
+}
+
+// The header used to carry the same invented topic on every channel. It says
+// the channel's actual rules instead, and says nothing at all when there are
+// none — which is itself the useful answer for most channels.
+function renderChannelTopic(channel) {
+  const topic = $('.chat-topic');
+  const rules = [];
+  if (channel) {
+    const role = channel.post_min_role || 'member';
+    if (role !== 'member') rules.push(`${role}s and above can post`);
+    const slow = Number(channel.slow_mode_seconds) || 0;
+    if (slow) rules.push(`slow mode ${slowModeLabel(slow)}`);
+    if (channel.uploads_allowed === false) rules.push('no images');
+  }
+  topic.textContent = rules.join(' · ');
+  topic.classList.toggle('hidden', !rules.length);
 }
 
 function slowModeLabel(seconds) {
@@ -477,7 +600,7 @@ function roleBadge(userId) { const role=state.members.find(member=>member.id===N
 function refreshMessages() { document.querySelectorAll('.message-row').forEach(row => { const message=state.messages.get(Number(row.dataset.messageId)); if(message) renderInto(row, message); }); dropDetachedRowMenu(); }
 
 async function selectChannel(channel) {
-  state.channel = channel; state.unreadBoundary = false;
+  state.channel = channel; state.unreadBoundary = false; state.olderMessages = false;
   if (!channel) {
     $('#channel-name').textContent = '';
     applyChannelRules();
@@ -493,14 +616,68 @@ async function selectChannel(channel) {
   const marker = channelState(channel.id).last_read_message_id;
   // Clear before awaiting so the previous channel's messages never sit under the new channel's name.
   state.messages.clear();
-  $('#messages').innerHTML = '<div class="empty"><div>#</div><h2>Welcome to #' + escapeHTML(channel.name) + '</h2><p>This is the beginning of the channel.</p></div>';
+  $('#messages').replaceChildren();
+  renderHistoryTop(channel);
   const data = await api(`/api/channels/${channel.id}/messages`);
   if (state.channel?.id !== channel.id) return;  // a later selection already owns the view
+  state.olderMessages = Boolean(data.has_more);
+  renderHistoryTop(channel);
   data.messages.forEach(message => {
     if (!state.unreadBoundary && message.id > marker && message.author_id !== state.user?.id) appendUnreadDivider();
-    appendMessage(message);
+    $('#messages').append(messageRow(message));
   });
+  // One pass for the whole page rather than one per message.
+  relayoutMessages();
   scrollMessages(); readActiveChannel();
+}
+
+// The top of a channel is one of two things, never both: the place it started,
+// or the way back to the rest of it. Saying "this is the beginning" above a
+// channel with thousands of older messages would simply be untrue.
+function renderHistoryTop(channel) {
+  const list = $('#messages');
+  list.querySelector('.history-top')?.remove();
+  const top = document.createElement('div');
+  top.className = 'history-top';
+  if (state.olderMessages) {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'load-earlier';
+    button.textContent = 'Load earlier messages';
+    button.onclick = () => loadEarlierMessages(button);
+    top.append(button);
+  } else {
+    top.innerHTML = '<div class="empty"><div>#</div><h2>Welcome to #' + escapeHTML(channel.name)
+      + '</h2><p>This is the beginning of the channel.</p></div>';
+  }
+  list.prepend(top);
+}
+
+async function loadEarlierMessages(button) {
+  const channel = state.channel;
+  const oldest = Math.min(...state.messages.keys());
+  if (!channel || !Number.isFinite(oldest)) return;
+  button.disabled = true; button.textContent = 'Loading…';
+  try {
+    const data = await api(`/api/channels/${Number(channel.id)}/messages?before=${oldest}`);
+    if (state.channel?.id !== channel.id) return;  // a later selection already owns the view
+    const list = $('#messages');
+    // Prepending grows the list upwards, which would otherwise drag the reader
+    // away from what they were looking at. The distance from the bottom is what
+    // stays fixed, so the same message keeps the same place on screen.
+    const fromBottom = list.scrollHeight - list.scrollTop;
+    state.olderMessages = Boolean(data.has_more);
+    renderHistoryTop(channel);
+    const batch = document.createDocumentFragment();
+    data.messages.forEach(message => batch.append(messageRow(message)));
+    list.querySelector('.history-top').after(batch);
+    // Grouping and day dividers both depend on the row before, and the batch
+    // has just changed what that is for the page already on screen.
+    relayoutMessages();
+    list.scrollTop = list.scrollHeight - fromBottom;
+  } catch (error) {
+    button.disabled = false; button.textContent = 'Load earlier messages';
+    showToast(error.message);
+  }
 }
 
 // Editing is the author's alone; deleting is the author's or a moderator's.
@@ -519,11 +696,18 @@ function messageActions(message) {
     ? rowMenuTrigger('data-message-menu', 'Message actions') : '';
 }
 
+const CLOCK = { hour: '2-digit', minute: '2-digit' };
+function clockTime(date) { return date.toLocaleTimeString([], CLOCK); }
+function fullMoment(date) { return date.toLocaleString([], { dateStyle: 'full', timeStyle: 'short' }); }
+
 function messageMarkup(message) {
   const date = new Date(message.created_at);
   const attachment = message.attachment ? `<a class="message-attachment" href="/api/attachments/${Number(message.attachment.id)}" target="_blank" rel="noopener"><img src="/api/attachments/${Number(message.attachment.id)}" alt="${escapeHTML(message.attachment.name)}" loading="lazy"><span>${escapeHTML(message.attachment.name)} · ${formatBytes(message.attachment.byte_size)}</span></a>` : '';
-  const edited = message.edited_at ? `<span class="message-edited" title="Edited ${escapeHTML(new Date(message.edited_at).toLocaleString())}">(edited)</span>` : '';
-  return `<div class="message-avatar">${escapeHTML(initials(message.username))}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${roleBadge(message.author_id)}<time>${date.toLocaleString([], {dateStyle:'medium',timeStyle:'short'})}</time>${edited}</div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>${messageActions(message)}`;
+  const edited = message.edited_at ? `<span class="message-edited" title="Edited ${escapeHTML(fullMoment(new Date(message.edited_at)))}">(edited)</span>` : '';
+  // The day is carried by the divider above, so the line itself only needs the
+  // time. A grouped row hides the avatar and shows this same time in its place.
+  const gutterTime = `<time class="gutter-time" datetime="${escapeHTML(message.created_at)}">${escapeHTML(clockTime(date))}</time>`;
+  return `<div class="message-avatar"><span class="avatar-initials">${escapeHTML(initials(message.username))}</span>${gutterTime}</div><div><div class="message-meta"><strong>${escapeHTML(message.username)}</strong>${roleBadge(message.author_id)}<time datetime="${escapeHTML(message.created_at)}" title="${escapeHTML(fullMoment(date))}">${escapeHTML(clockTime(date))}</time>${edited}</div><div class="message-body">${escapeHTML(message.body)}</div>${attachment}</div>${messageActions(message)}`;
 }
 
 function renderInto(row, message) {
@@ -535,14 +719,100 @@ function renderInto(row, message) {
   trigger?.addEventListener('click', () => openRowMenu(trigger, messageMenuItems(message)));
 }
 
-function appendMessage(message) {
+function messageRow(message) {
   const row = document.createElement('article'); row.className = 'message-row'; row.dataset.messageId = message.id; row.dataset.authorId = message.author_id;
   renderInto(row, message);
-  $('#messages').append(row); scrollMessages();
+  return row;
+}
+
+function appendMessage(message) {
+  const list = $('#messages');
+  // Decided before the row exists: appending changes the height this measures.
+  const follow = atLatest(list);
+  list.append(messageRow(message));
+  relayoutMessages();
+  if (follow) scrollMessages(); else renderJumpLatest();
 }
 
 function replaceMessage(message) { const row=document.querySelector(`[data-message-id="${Number(message.id)}"]`); if(row) renderInto(row, message); }
-function removeMessage(messageId) { document.querySelector(`[data-message-id="${Number(messageId)}"]`)?.remove(); state.messages.delete(Number(messageId)); }
+function removeMessage(messageId) {
+  document.querySelector(`[data-message-id="${Number(messageId)}"]`)?.remove();
+  state.messages.delete(Number(messageId));
+  // The row below may have been grouped under the one that just went away.
+  relayoutMessages();
+}
+
+// ---------- Reading a conversation ----------
+// Consecutive lines from one person within a few minutes are one thought, not
+// several, so only the first of them carries a name and a face. A new day, and
+// the boundary the reader is meant to notice, both start the header again.
+
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
+
+function sameDay(first, second) {
+  return first.getFullYear() === second.getFullYear()
+    && first.getMonth() === second.getMonth()
+    && first.getDate() === second.getDate();
+}
+
+function dayLabel(date) {
+  const today = new Date();
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  if (sameDay(date, today)) return 'Today';
+  if (sameDay(date, yesterday)) return 'Yesterday';
+  const sameYear = date.getFullYear() === today.getFullYear();
+  return date.toLocaleDateString([], sameYear
+    ? { weekday: 'long', day: 'numeric', month: 'long' }
+    : { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+function dayDivider(date) {
+  const divider = document.createElement('div');
+  divider.className = 'day-divider';
+  const label = document.createElement('span');
+  label.textContent = dayLabel(date);
+  divider.append(label);
+  return divider;
+}
+
+// One pass over the rendered rows. Both decisions depend on the row before, so
+// re-deriving the whole list after an insertion is simpler than patching the
+// seams — and it is the only version that stays correct when a page of older
+// messages arrives above rows that were already grouped.
+function relayoutMessages() {
+  const list = $('#messages');
+  list.querySelectorAll('.day-divider').forEach(divider => divider.remove());
+  let previous = null;
+  for (const row of list.querySelectorAll('.message-row')) {
+    const message = state.messages.get(Number(row.dataset.messageId));
+    if (!message) continue;
+    const moment = new Date(message.created_at);
+    const newDay = !previous || !sameDay(previous.moment, moment);
+    // Read before the divider is inserted, which would become the sibling.
+    const afterUnread = Boolean(row.previousElementSibling?.classList.contains('unread-divider'));
+    if (newDay) row.before(dayDivider(moment));
+    row.classList.toggle('grouped', !newDay && !afterUnread
+      && previous.message.author_id === message.author_id
+      && moment - previous.moment < GROUP_WINDOW_MS);
+    previous = { message, moment };
+  }
+}
+
+// ---------- Staying where you are reading ----------
+// An arriving message must not drag somebody out of the history they went back
+// for, so the view follows only when it was already at the end.
+
+const AT_LATEST_SLACK = 140;
+function atLatest(list = $('#messages')) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= AT_LATEST_SLACK;
+}
+
+function renderJumpLatest() {
+  $('#jump-latest').classList.toggle('hidden', atLatest());
+}
+
+$('#jump-latest').onclick = () => { scrollMessages(); readActiveChannel(); };
+$('#messages').addEventListener('scroll', renderJumpLatest, { passive: true });
 
 function startEdit(message) {
   const row = document.querySelector(`[data-message-id="${Number(message.id)}"]`); if (!row) return;
@@ -557,16 +827,24 @@ function startEdit(message) {
     const body = field.value.trim(); if (!body) return;
     if (body === message.body) return cancel();
     try { replaceMessage(await api(`/api/messages/${Number(message.id)}`, { method:'PATCH', body:JSON.stringify({ body }) })); }
-    catch (error) { alert(error.message); cancel(); }
+    catch (error) { showToast(error.message); cancel(); }
   };
 }
 
 async function deleteMessage(message) {
-  if (!confirm(message.attachment ? 'Delete this image? The file is removed from the server.' : 'Delete this message?')) return;
+  if (!await askConfirm({ eyebrow: 'Delete', title: message.attachment ? 'Delete this image?' : 'Delete this message?',
+      body: message.attachment
+        ? 'The file is erased from the server as well as from the conversation.'
+        : 'It disappears for everybody in the channel. This cannot be undone.',
+      confirmLabel: 'Delete', danger: true })) return;
   try { await api(`/api/messages/${Number(message.id)}`, { method:'DELETE' }); removeMessage(message.id); }
-  catch (error) { alert(error.message); }
+  catch (error) { showToast(error.message); }
 }
-function scrollMessages() { const list = $('#messages'); list.scrollTop = list.scrollHeight; }
+function scrollMessages() {
+  const list = $('#messages');
+  list.scrollTop = list.scrollHeight;
+  renderJumpLatest();
+}
 function formatBytes(value) { const bytes=Number(value)||0; if(bytes < 1024*1024) return `${Math.ceil(bytes/1024)} KB`; if(bytes < 1024*1024*1024) return `${(bytes/1024/1024).toFixed(1)} MB`; return `${(bytes/1024/1024/1024).toFixed(2)} GB`; }
 
 function setAuthMode(register) { registering = register; $('#auth-submit').textContent = registering ? 'Create account' : 'Sign in'; $('#auth-toggle').textContent = registering ? 'Already have an account? Sign in' : 'New here? Create an account'; $('#password').autocomplete = registering ? 'new-password' : 'current-password'; $('#invite-label').classList.toggle('hidden', !registering); $('#passkey-login').classList.toggle('hidden',registering||!window.PublicKeyCredential); }
@@ -584,7 +862,37 @@ $('#passkey-login').onclick = async () => {
 };
 $('#message-form').onsubmit = sendMessage;
 $('#message').onkeydown = event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(event); } };
-async function sendMessage(event) { event.preventDefault(); const input=$('#message'), body=input.value.trim(); if(!body || !state.channel)return; input.value=''; try { const message=await api(`/api/channels/${state.channel.id}/messages`,{method:'POST',body:JSON.stringify({body})}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); readActiveChannel(); } catch(error){ input.value=body; alert(error.message); } }
+async function sendMessage(event) {
+  event.preventDefault();
+  const input = $('#message'), body = input.value.trim();
+  if (!body || !state.channel) return;
+  input.value = ''; resizeComposer();
+  // Sending is a deliberate move to the end of the conversation, so this is
+  // the one arrival that always follows.
+  scrollMessages();
+  try {
+    const message = await api(`/api/channels/${state.channel.id}/messages`,
+      { method: 'POST', body: JSON.stringify({ body }) });
+    if (!document.querySelector(`[data-message-id="${message.id}"]`)) appendMessage(message);
+    scrollMessages(); readActiveChannel();
+  } catch (error) {
+    // Give the words back rather than making somebody retype them.
+    input.value = body; resizeComposer(); input.focus();
+    showToast(error.message);
+  }
+}
+
+// The composer grows with what is being written instead of hiding it behind a
+// one-line scroll, and stops at a height that still leaves the conversation
+// visible. Setting the height through the CSSOM is not an inline style
+// attribute, so the Content-Security-Policy allows it.
+const COMPOSER_MAX_HEIGHT = 168;
+function resizeComposer() {
+  const field = $('#message');
+  field.style.height = 'auto';
+  field.style.height = `${Math.min(field.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+}
+$('#message').addEventListener('input', resizeComposer);
 $('#upload-button').onclick = () => state.channel && $('#file-input').click();
 $('#toggle-members').onclick = () => { const compact=window.matchMedia('(max-width: 1100px)').matches; if(compact){ setNavOpen(false); $('#members-panel').classList.toggle('open'); } else $('#app').classList.toggle('members-hidden'); const visible=compact?$('#members-panel').classList.contains('open'):!$('#app').classList.contains('members-hidden'); $('#toggle-members').setAttribute('aria-expanded',String(visible)); };
 $('#close-members').onclick = () => { $('#members-panel').classList.remove('open'); $('#toggle-members').setAttribute('aria-expanded','false'); };
@@ -617,7 +925,7 @@ document.addEventListener('keydown', event => {
 });
 // A drawer parked off-screen must not keep a resize's worth of stale state.
 window.addEventListener('resize', () => { if (!navIsDrawer()) setNavOpen(false); });
-$('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > 8*1024*1024){alert('Images must be 8 MB or smaller.');return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){alert(error.message);} finally {button.disabled=false;button.textContent='+';} };
+$('#file-input').onchange = async event => { const file=event.target.files[0]; event.target.value=''; if(!file || !state.channel)return; if(file.size > state.maxUploadBytes){showToast(`That image is ${formatBytes(file.size)}. This instance accepts up to ${formatBytes(state.maxUploadBytes)}.`);return;} const button=$('#upload-button'); button.disabled=true; button.textContent='…'; try { const message=await api(`/api/channels/${state.channel.id}/uploads`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Campfire-Filename':encodeURIComponent(file.name)},body:file}); if(!document.querySelector(`[data-message-id="${message.id}"]`))appendMessage(message); } catch(error){showToast(error.message);} finally {button.disabled=false;button.textContent='+';} };
 $('#logout').onclick = async () => { state.eventSource?.close(); await api('/api/logout',{method:'POST'}); showAuth(); };
 $('#account-settings').onclick = async () => { closeNavOnDrawer(); $('#account-dialog').showModal(); $('#password-status').classList.remove('error'); $('#password-status').textContent=''; $('#passkey-status').textContent=''; $('#delete-status').textContent=''; $('#delete-status').classList.remove('error'); $('#delete-account-form').reset(); await Promise.all([loadSessions(), loadPasskeys(), loadDeletionPlan()]); };
 $('#close-account').onclick = () => { $('#password-form').reset(); $('#passkey-form').reset(); $('#delete-account-form').reset(); $('#account-dialog').close(); };
@@ -642,8 +950,10 @@ async function loadSessions() {
   } catch(error){list.innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`;}
 }
 async function revokeSession(sessionId) {
-  if(!confirm('Sign out that session? Its live connection will close within a couple of seconds.'))return;
-  try{await api(`/api/sessions/${sessionId}`,{method:'DELETE'});await loadSessions();}catch(error){alert(error.message);}
+  if (!await askConfirm({ eyebrow: 'Account security', title: 'Sign out that session?',
+      body: 'Its live connection closes within a couple of seconds and it will need the password again.',
+      confirmLabel: 'Sign it out', danger: true })) return;
+  try{await api(`/api/sessions/${sessionId}`,{method:'DELETE'});await loadSessions();}catch(error){showToast(error.message);}
 }
 async function loadPasskeys() {
   const list=$('#passkey-list');
@@ -668,7 +978,9 @@ $('#passkey-form').onsubmit = async event => {
 async function deletePasskey(passkeyId) {
   const password=$('#passkey-password').value,status=$('#passkey-status');status.classList.remove('error');
   if(!password){status.classList.add('error');status.textContent='Enter your current password above before removing a passkey.';return;}
-  if(!confirm('Remove this passkey? Devices using it will no longer sign in.'))return;
+  if (!await askConfirm({ eyebrow: 'Account security', title: 'Remove this passkey?',
+      body: 'Devices using it can no longer sign in. Your password still works.',
+      confirmLabel: 'Remove', danger: true })) return;
   try{await api(`/api/passkeys/${passkeyId}`,{method:'DELETE',body:JSON.stringify({current_password:password})});status.textContent='Passkey removed.';await loadPasskeys();}
   catch(error){status.classList.add('error');status.textContent=error.message;}
 }
@@ -687,7 +999,9 @@ async function loadDeletionPlan() {
 $('#delete-account-form').onsubmit = async event => {
   event.preventDefault();
   const status=$('#delete-status'); status.classList.remove('error'); status.textContent='';
-  if(!confirm('Delete your account permanently? Your messages and images go with it, and this cannot be undone.'))return;
+  if (!await askConfirm({ eyebrow: 'Permanent', title: 'Delete your account?',
+      body: 'Every message you wrote and every image you shared goes with it, in all communities. This cannot be undone.',
+      confirmLabel: 'Delete permanently', danger: true })) return;
   const button=event.currentTarget.querySelector('button[type="submit"]'); button.disabled=true;
   try {
     await api('/api/account',{method:'DELETE',body:JSON.stringify({current_password:$('#delete-password').value})});
@@ -716,8 +1030,11 @@ async function loadStorage() {
     const share = limit ? Math.min(100, Math.round((used / limit) * 100)) : 0;
     // Without a ceiling there is no proportion to draw, so say the total and
     // how to set one rather than showing a bar against nothing.
+    // The fill is sized below rather than with a `style` attribute here: the
+    // Content-Security-Policy sets `style-src 'self'`, which refuses an inline
+    // style attribute and would leave the bar permanently empty.
     const meter = limit
-      ? `<div class="storage-bar"><span style="width:${share}%"></span></div>
+      ? `<div class="storage-bar"><span></span></div>
          <p class="storage-line">${escapeHTML(formatBytes(used))} of ${escapeHTML(formatBytes(limit))} used · ${share}%</p>`
       : `<p class="storage-line">${escapeHTML(formatBytes(used))} across ${Number(report.files)} image${Number(report.files) === 1 ? '' : 's'}. No limit is set; CAMPFIRE_MAX_STORAGE_BYTES sets one.</p>`;
     const drift = report.stored_bytes !== null && Number(report.stored_bytes) !== used
@@ -727,6 +1044,10 @@ async function loadStorage() {
     const rows = report.communities.map(entry =>
       `<article class="invite-row"><div><strong>${escapeHTML(entry.name)}</strong><span>${escapeHTML(formatBytes(entry.bytes))} · ${Number(entry.files)} image${Number(entry.files) === 1 ? '' : 's'}</span></div></article>`).join('');
     panel.innerHTML = warnings + meter + drift + rows;
+    // Setting the width through the CSSOM is not an inline style attribute, so
+    // the policy above allows it.
+    const fill = panel.querySelector('.storage-bar span');
+    if (fill) fill.style.width = `${share}%`;
   } catch (error) { panel.innerHTML = `<p class="member-empty">${escapeHTML(error.message)}</p>`; }
 }
 $('#retention-form').onsubmit = async event => {
@@ -735,7 +1056,9 @@ $('#retention-form').onsubmit = async event => {
   const status = $('#retention-status'); status.classList.remove('error'); status.textContent = '';
   const messageDays = Number($('#message-retention').value);
   const attachmentDays = Number($('#attachment-retention').value);
-  if (messageDays && !confirm(`Delete messages older than ${messageDays} days in ${community.name}? This runs immediately and cannot be undone.`)) return;
+  if (messageDays && !await askConfirm({ eyebrow: 'Retention', title: `Delete messages older than ${messageDays} days?`,
+      body: `Everything past that age in ${community.name} is erased. This runs immediately and cannot be undone.`,
+      confirmLabel: 'Apply retention', danger: true })) return;
   const button = event.currentTarget.querySelector('button[type="submit"]'); button.disabled = true;
   try {
     const stored = await api(`/api/communities/${Number(community.id)}/retention`, { method: 'PATCH',
@@ -771,19 +1094,105 @@ $('#channel-form').onsubmit = async event => {
   } catch (error) { status.classList.add('error'); status.textContent = error.message; }
   finally { button.disabled = false; }
 };
-$('#add-community').onclick = async () => { const name=prompt('Community name'); if(!name)return; try { const community=await api('/api/communities',{method:'POST',body:JSON.stringify({name})}); state.communities.push(community); selectCommunity(community); } catch(error){alert(error.message);} };
-$('#join-community').onclick = async () => { const invite=prompt('Paste the invite code'); if(!invite)return; try { await api('/api/invites/join',{method:'POST',body:JSON.stringify({invite})}); await enterApp(); } catch(error){alert(error.message);} };
-$('#invite-friend').onclick = async () => { if(!state.community)return; closeNavOnDrawer(); $('#invite-dialog').showModal(); await loadInvites(); };
-$('#close-invites').onclick = () => $('#invite-dialog').close();
-$('#create-invite').onclick = async () => { if(!state.community)return; const button=$('#create-invite'); button.disabled=true; try { const data=await api('/api/invites',{method:'POST',body:JSON.stringify({community_id:state.community.id,max_uses:10,lifetime_hours:24})}); if(navigator.clipboard && window.isSecureContext){await navigator.clipboard.writeText(data.token); alert('Invite code copied. It expires in 24 hours.');}else{prompt('Copy this invite code. It expires in 24 hours.',data.token);} await loadInvites(); } catch(error){alert(error.message);} finally {button.disabled=false;} };
+$('#add-community').onclick = async () => {
+  const name = await askText({ eyebrow: 'New community', title: 'Name your community',
+    note: 'You will be its owner. It starts with one channel, #general.',
+    label: 'Community name', placeholder: 'Sunday climbing', maxLength: 40 });
+  if (!name) return;
+  try {
+    const community = await api('/api/communities', { method: 'POST', body: JSON.stringify({ name }) });
+    state.communities.push(community); selectCommunity(community);
+    showToast(`${community.name} is ready.`, 'good');
+  } catch (error) { showToast(error.message); }
+};
+$('#join-community').onclick = async () => {
+  const invite = await askText({ eyebrow: 'Join a community', title: 'Paste your invite code',
+    note: 'Somebody already inside has to create one for you; Campfire has no public directory.',
+    label: 'Invite code', maxLength: 64, submitLabel: 'Join' });
+  if (!invite) return;
+  try {
+    const joined = await api('/api/invites/join', { method: 'POST', body: JSON.stringify({ invite }) });
+    await enterApp();
+    showToast(`You are in ${joined.name}.`, 'good');
+  } catch (error) { showToast(error.message); }
+};
+$('#invite-friend').onclick = async () => { if(!state.community)return; closeNavOnDrawer(); hideInvite(); $('#invite-dialog').showModal(); await loadInvites(); };
+// A code left on screen belongs to the moment it was created, not to the next
+// time somebody opens this panel.
+$('#close-invites').onclick = () => { hideInvite(); $('#invite-dialog').close(); };
+$('#invite-dialog').addEventListener('close', hideInvite);
+$('#create-invite').onclick = async () => {
+  if (!state.community) return;
+  const button = $('#create-invite'); button.disabled = true;
+  try {
+    const data = await api('/api/invites', { method: 'POST',
+      body: JSON.stringify({ community_id: state.community.id, max_uses: 10, lifetime_hours: 24 }) });
+    // On screen first, always. Only the digest is stored, so a code nobody
+    // reads here is gone — it must not depend on the clipboard working.
+    revealInvite(data.token);
+    if (await copyText(data.token)) showToast('Invite code copied to your clipboard.', 'good');
+    await loadInvites();
+  } catch (error) { showToast(error.message); }
+  finally { button.disabled = false; }
+};
+
+function revealInvite(token) {
+  $('#invite-code').textContent = token;
+  $('#invite-fresh').classList.remove('hidden');
+  $('#copy-invite').textContent = 'Copy';
+}
+
+function hideInvite() { $('#invite-fresh').classList.add('hidden'); $('#invite-code').textContent = ''; }
+$('#dismiss-invite').onclick = hideInvite;
+$('#copy-invite').onclick = async () => {
+  $('#copy-invite').textContent = await copyText($('#invite-code').textContent)
+    ? 'Copied' : 'Select it and copy';
+};
+
+// The clipboard needs a secure context and the browser's permission, and either
+// can refuse. Saying so honestly is better than reporting a copy that never
+// happened, because nothing else can show this code again.
+async function copyText(value) {
+  if (!navigator.clipboard || !window.isSecureContext) return false;
+  try { await navigator.clipboard.writeText(value); return true; }
+  catch { return false; }
+}
 async function loadInvites() { const communityId=state.community?.id; if(!communityId)return; $('#invite-list').innerHTML='<p class="member-empty">Loading invites…</p>'; try { const data=await api(`/api/communities/${communityId}/invites`); if(state.community?.id!==communityId)return; $('#invite-list').innerHTML=data.invites.length?data.invites.map(invite=>`<article class="invite-row"><div><strong>Invite #${Number(invite.id)}</strong><span>Created by ${escapeHTML(invite.creator_username)} · ${Number(invite.uses)}/${Number(invite.max_uses)} uses</span><span>Expires ${new Date(Number(invite.expires_at)*1000).toLocaleString()}</span></div><button type="button" data-revoke-invite="${Number(invite.id)}">Revoke</button></article>`).join(''):'<p class="member-empty">No active invites.</p>'; document.querySelectorAll('[data-revoke-invite]').forEach(button=>button.onclick=()=>revokeInvite(Number(button.dataset.revokeInvite))); } catch(error){ $('#invite-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
-async function revokeInvite(inviteId) { if(!confirm(`Revoke invite #${inviteId}? Every copy will stop working immediately.`))return; try { await api(`/api/invites/${inviteId}`,{method:'DELETE'}); await loadInvites(); } catch(error){alert(error.message);} }
+async function revokeInvite(inviteId) {
+  if (!await askConfirm({ eyebrow: 'Community access', title: `Revoke invite #${inviteId}?`,
+      body: 'Every copy of that code stops working immediately, including ones already sent.',
+      confirmLabel: 'Revoke', danger: true })) return;
+  try { await api(`/api/invites/${inviteId}`, { method: 'DELETE' }); await loadInvites(); }
+  catch (error) { showToast(error.message); }
+}
 $('#manage-bans').onclick = async () => { if(!state.community)return; closeNavOnDrawer(); $('#ban-dialog').showModal(); await loadBans(); };
 $('#close-bans').onclick = () => $('#ban-dialog').close();
 async function loadBans() { const communityId=state.community?.id; if(!communityId)return; $('#ban-list').innerHTML='<p class="member-empty">Loading bans…</p>'; try { const data=await api(`/api/communities/${communityId}/bans`); if(state.community?.id!==communityId)return; $('#ban-list').innerHTML=data.bans.length?data.bans.map(ban=>`<article class="invite-row"><div><strong>${escapeHTML(ban.username)}</strong><span>Banned by ${escapeHTML(ban.banned_by_username||'a former moderator')} · ${new Date(ban.created_at).toLocaleString()}</span></div>${canModerateRole(ban.role_at_ban)?`<button type="button" data-unban-member="${Number(ban.user_id)}">Unban</button>`:''}</article>`).join(''):'<p class="member-empty">No banned accounts.</p>'; document.querySelectorAll('[data-unban-member]').forEach(button=>button.onclick=()=>unbanMember(Number(button.dataset.unbanMember))); } catch(error){ $('#ban-list').innerHTML=`<p class="member-empty">${escapeHTML(error.message)}</p>`; } }
-async function unbanMember(userId) { if(!confirm('Allow this account to join again?'))return; try { await api(`/api/communities/${state.community.id}/bans/${userId}`,{method:'DELETE'}); await loadBans(); } catch(error){alert(error.message);} }
-$('#add-channel').onclick = async () => { if(!state.community)return; const name=prompt('Channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); selectChannel(channel); } catch(error){alert(error.message);} };
-$('#add-voice-channel').onclick = async () => { if(!state.community)return; const name=prompt('Voice channel name'); if(!name)return; try { const channel=await api('/api/channels',{method:'POST',body:JSON.stringify({name,kind:'voice',community_id:state.community.id})}); state.community.channels.push(channel); renderChannels(); window.CampfireVoice?.open(channel); } catch(error){alert(error.message);} };
+async function unbanMember(userId) {
+  if (!await askConfirm({ eyebrow: 'Moderation', title: 'Lift this ban?',
+      body: 'The account can join again with a valid invite.', confirmLabel: 'Lift ban' })) return;
+  try { await api(`/api/communities/${state.community.id}/bans/${userId}`, { method: 'DELETE' }); await loadBans(); }
+  catch (error) { showToast(error.message); }
+}
+$('#add-channel').onclick = () => createChannel('text');
+$('#add-voice-channel').onclick = () => createChannel('voice');
+
+// Both kinds ask the same question and differ only in what happens after.
+async function createChannel(kind) {
+  if (!state.community) return;
+  const voice = kind === 'voice';
+  const name = await askText({ eyebrow: voice ? 'New voice channel' : 'New text channel',
+    title: voice ? 'Name the voice channel' : 'Name the channel',
+    note: 'Letters, numbers and hyphens. Everything else becomes a hyphen.',
+    label: 'Channel name', placeholder: voice ? 'campfire' : 'planning', maxLength: 30 });
+  if (!name) return;
+  try {
+    const channel = await api('/api/channels', { method: 'POST',
+      body: JSON.stringify({ name, kind, community_id: state.community.id }) });
+    state.community.channels.push(channel); renderChannels();
+    if (voice) window.CampfireVoice?.open(channel); else selectChannel(channel);
+  } catch (error) { showToast(error.message); }
+}
 
 $('#notify-settings').onclick = () => { closeNavOnDrawer(); $('#notify-dialog').showModal(); renderNotificationSettings(); };
 $('#close-notify').onclick = () => $('#notify-dialog').close();
@@ -805,14 +1214,14 @@ function renderNotificationSettings() {
 
 async function setDefaultNotifications(mode) {
   try { const data = await api('/api/preferences/notifications', { method: 'PATCH', body: JSON.stringify({ default_mode: mode }) }); state.defaultMode = data.default_mode; renderChannels(); renderCommunities(); renderNotificationBell(); }
-  catch (error) { alert(error.message); }
+  catch (error) { showToast(error.message); }
   if (mode === 'all') await requestNotificationPermission();
   renderNotificationSettings();
 }
 
 async function setChannelNotifications(channelId, mode) {
   try { applyChannelState(await api(`/api/channels/${channelId}/notifications`, { method: 'PATCH', body: JSON.stringify({ mode }) })); }
-  catch (error) { alert(error.message); }
+  catch (error) { showToast(error.message); }
   if (mode === 'all') await requestNotificationPermission();
   renderNotificationSettings();
 }

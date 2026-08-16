@@ -28,10 +28,11 @@ completely full. It returns
 `Retry-After: 5` header. Named checks report only `ok` or `failed`; exception
 messages and filesystem paths are never exposed.
 
-The `warnings` array contains stable codes when Campfire's configured image
-ceiling or a filesystem it uses has crossed the warning percentage. Warnings do
-not make the instance unready: text chat can remain healthy when image uploads
-are near their separately configured ceiling.
+Readiness reports readiness and nothing else. It carries no capacity
+information: how full an instance is describes the people using it, and this
+endpoint can be called by anyone who can resolve the public name. Storage
+warnings are returned by `GET /api/storage`, which requires an administrator
+session, and are shown in the community settings panel.
 
 ## Authentication
 
@@ -200,6 +201,9 @@ Alongside the communities, `notifications.default_mode` gives the account-wide
 default (`all` unless it has been changed). `media.enabled` tells the client
 whether LiveKit is configured and `media.max_participants` carries the voice
 ceiling; no media credential or key is returned by bootstrap.
+`limits.max_upload_bytes` repeats the ceiling `CAMPFIRE_MAX_UPLOAD_BYTES` sets,
+so a client can refuse an oversized image before uploading it rather than
+assuming a limit the instance may not be using.
 
 ## Communities and channels
 
@@ -411,9 +415,21 @@ is checked before the invitation is consumed.
 
 ### `GET /api/channels/{channel_id}/messages`
 
-Returns the latest 100 messages in ascending order. `?after={message_id}` may be
-used to request only newer messages. Edited messages carry an `edited_at`
-timestamp; unedited ones carry `null`.
+Returns up to 100 messages in ascending order, newest page first, alongside
+`has_more`: whether any message older than the oldest one returned still exists
+in this channel.
+
+| Parameter | Effect |
+| --- | --- |
+| `?after={message_id}` | return only messages newer than this id |
+| `?before={message_id}` | return the page immediately older than this id |
+
+`before` is how a client walks backwards through a channel that holds more than
+one page; `has_more` tells it when it has reached the beginning, so it can stop
+offering a request that would come back empty. A value that is not a
+non-negative integer is ignored rather than refused, which returns the newest
+page. Edited messages carry an `edited_at` timestamp; unedited ones carry
+`null`.
 
 ### `POST /api/channels/{channel_id}/messages`
 
@@ -421,7 +437,11 @@ timestamp; unedited ones carry `null`.
 {"body": "hello friends"}
 ```
 
-Message bodies contain 1–4000 characters. Both reads and writes require current
+Message bodies contain 1–4000 characters. Posting is rate-limited per account,
+well above conversational speed, so a stuck client or a runaway script cannot
+fill the disk while nobody is watching; exceeding it answers `429`. That floor
+is separate from a channel's optional slow mode, which is a community control,
+off by default, and exempts moderators. Both reads and writes require current
 community membership.
 
 ### `PATCH /api/messages/{message_id}`
@@ -437,17 +457,23 @@ is the updated message with `edited_at` set. Messages carrying an image return
 
 ### `DELETE /api/messages/{message_id}`
 
-Deletes a message when requested by its author or by a moderator,
-administrator, or owner of its community. Any attachment it carries is removed
-from the database and from disk in the same operation. Members without either
-right receive `403`; users outside the community receive `404` rather than
-learning that the message exists.
+Deletes a message when requested by its author, or by a moderator or above whose
+role outranks the author's. Moderation acts downwards here exactly as it does
+for kicks and bans: a moderator cannot delete an administrator's or the owner's
+messages, and cannot delete a fellow moderator's. An author who has since been
+removed from the community ranks as a member, so the words a kicked account left
+behind stay moderatable. Any attachment the message carries is removed from the
+database and from disk in the same operation. Members without either right
+receive `403`; users outside the community receive `404` rather than learning
+that the message exists.
 
 ### `POST /api/channels/{channel_id}/uploads`
 
 The request body is the raw image bytes. Required headers are `Content-Length`,
 `Content-Type`, and `X-Campfire-Filename` (the original filename encoded with
-`encodeURIComponent`). The default maximum is 8 MiB. PNG, JPEG, GIF, and WebP
+`encodeURIComponent`). The default maximum is 8 MiB, set by
+`CAMPFIRE_MAX_UPLOAD_BYTES` and published to clients through
+`GET /api/bootstrap`. PNG, JPEG, GIF, and WebP
 are accepted only when filename extension, declared MIME type, and file
 signature agree.
 

@@ -76,8 +76,9 @@ default rather than open by default.
 
 To invite someone: pick your community, press **⌁** in the channel sidebar
 header, and create a 24-hour code. Codes are shown once, at creation, because
-only their digest is stored. Revoking a code invalidates every copy of it
-immediately.
+only their digest is stored — so the new code stays on screen, selectable, until
+you dismiss it, and is copied to your clipboard as well when the browser allows
+it. Revoking a code invalidates every copy of it immediately.
 
 Data lands in `data/campfire.db` and `data/uploads/`. Snapshot both together;
 copying one path alone is not a consistent backup. The supplied Compose runbook

@@ -169,7 +169,7 @@ The `ls` command should print all four paths without a "No such file" error.
 All remaining commands in this guide assume this is your current directory.
 
 For a serious deployment, use a tagged release and verify its checksum and
-attestation as described in [RELEASES.md](RELEASES.md). A checkout of the main
+attestation as described in [RELEASES.md](RELEASES.md). A checkout of the master
 branch is convenient for evaluation but can change between deployments.
 
 ## Step 4: create the configuration file
@@ -197,6 +197,8 @@ CAMPFIRE_MEDIA_DOMAIN=media.example.net
 CAMPFIRE_LIVEKIT_API_KEY=campfire-media
 CAMPFIRE_MAX_STORAGE_BYTES=10737418240
 CAMPFIRE_STORAGE_WARNING_PERCENT=90
+CAMPFIRE_MAX_UPLOAD_BYTES=8388608
+CAMPFIRE_MAX_REQUEST_BODY=9MB
 ```
 
 In `nano`, press `Ctrl+O`, then Enter to save, and `Ctrl+X` to exit.
@@ -338,7 +340,7 @@ curl --fail --show-error https://chat.example.net/readyz
 A healthy response resembles:
 
 ```json
-{"status":"ready","checks":{"database":"ok","storage":"ok"},"warnings":[]}
+{"status":"ready","checks":{"database":"ok","storage":"ok"}}
 ```
 
 `curl --fail` returns an error for an HTTP failure status. If DNS was only just
@@ -631,13 +633,33 @@ Campfire provides two deliberately small unauthenticated endpoints:
   filesystem space.
 
 Readiness returns HTTP `503` and `Retry-After: 5` if it cannot safely serve. Its
-response names only broad checks; it does not expose filesystem paths or raw
-exception text.
+response names only broad checks; it does not expose filesystem paths, raw
+exception text, or how full the instance is. Both endpoints are unauthenticated
+and reachable from the public name, so they answer only the question a probe is
+entitled to ask.
 
-The administrator storage panel and readiness response warn when image storage
-or a backing filesystem reaches `CAMPFIRE_STORAGE_WARNING_PERCENT`. A warning
-does not make the instance unavailable because text chat may still work. No
-usable filesystem space does fail readiness.
+Capacity is reported separately, to administrators only. The storage panel in
+community settings warns when image storage or a backing filesystem reaches
+`CAMPFIRE_STORAGE_WARNING_PERCENT`; the same warnings are returned by
+`GET /api/storage`, which requires an administrator session. A warning does not
+make the instance unavailable because text chat may still work. No usable
+filesystem space *does* fail readiness.
+
+### Image size limits
+
+Two ceilings govern one upload and must be set together:
+
+| Setting | Applies at | Default |
+| --- | --- | --- |
+| `CAMPFIRE_MAX_UPLOAD_BYTES` | Campfire, in bytes | `8388608` (8 MiB) |
+| `CAMPFIRE_MAX_REQUEST_BODY` | Caddy, as a size string | `9MB` |
+
+Caddy refuses an oversized body before Campfire ever sees it, so a proxy ceiling
+at or below the application ceiling rejects uploads with an error Campfire never
+wrote and cannot explain. Keep the proxy value comfortably above the byte value
+whenever you raise either. Campfire publishes its own limit to the browser
+through `GET /api/bootstrap`, so the client refuses an oversized image locally
+using the same number the server enforces.
 
 ## Why public configuration fails closed
 

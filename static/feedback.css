@@ -1,0 +1,193 @@
+/* Toasts, the two shared dialogs, and the revealed invite code.
+
+   Campfire asks its own questions rather than calling window.prompt/confirm and
+   reports failures in the corner rather than through window.alert. A browser
+   may suppress those dialogs entirely, and an invite code is shown exactly
+   once — losing one to a suppressed dialog is not a recoverable mistake. */
+
+/* ---------- toasts ---------------------------------------------------- */
+
+.toasts {
+  bottom: 18px;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  left: 18px;
+  pointer-events: none;
+  position: fixed;
+  right: 18px;
+  z-index: 60;
+}
+
+.toast {
+  align-items: flex-start;
+  animation: toast-in .18s ease-out;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--muted);
+  border-radius: 10px;
+  box-shadow: 0 18px 44px #0009;
+  color: var(--ink);
+  display: flex;
+  font-size: 14px;
+  gap: 12px;
+  line-height: 1.45;
+  max-width: min(420px, 100%);
+  padding: 12px 12px 12px 14px;
+  pointer-events: auto;
+}
+
+.toast-error { border-left-color: var(--danger); }
+.toast-good { border-left-color: #6dd6a9; }
+.toast-info { border-left-color: var(--accent2); }
+
+.toast-dismiss {
+  background: none;
+  color: var(--muted);
+  flex: none;
+  font-size: 18px;
+  line-height: 1;
+  margin: -2px -2px 0 0;
+  padding: 0 2px;
+}
+
+.toast-dismiss:hover { color: var(--ink); }
+
+.toast.leaving {
+  animation: toast-out .18s ease-in forwards;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; }
+  to { opacity: 0; transform: translateY(4px); }
+}
+
+/* ---------- shared question and confirmation dialogs ------------------- */
+
+.ask-dialog,
+.confirm-dialog {
+  max-width: 440px;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+/* The primary action keeps its accent; the way out is quiet but never hidden.
+   `.primary` is full width by default, which is wrong beside a Cancel. */
+.dialog-actions .primary,
+.dialog-actions .danger {
+  width: auto;
+}
+
+.dialog-actions button {
+  border-radius: 9px;
+  font-weight: 700;
+  padding: 11px 18px;
+}
+
+.dialog-actions button:not(.primary):not(.danger) {
+  background: #ffffff0d;
+  color: var(--ink);
+}
+
+.dialog-actions button:not(.primary):not(.danger):hover {
+  background: #ffffff1a;
+}
+
+.dialog-actions .danger {
+  background: var(--danger);
+  color: #2a0f0d;
+}
+
+.ask-dialog label {
+  color: #c8c7ce;
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  margin: 18px 0 0;
+}
+
+.ask-dialog input {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--ink);
+  display: block;
+  margin-top: 8px;
+  outline: none;
+  padding: 12px 13px;
+  width: 100%;
+}
+
+.ask-dialog input:focus { border-color: var(--accent); }
+
+.confirm-dialog h2 { text-wrap: balance; }
+
+/* ---------- a freshly created invite code ------------------------------ */
+
+.invite-fresh {
+  background: #17181c;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  margin: 18px 0 4px;
+  padding: 16px;
+}
+
+.invite-fresh .eyebrow { margin: 0 0 10px; }
+.invite-fresh .muted { font-size: 13px; margin: 10px 0 0; }
+.invite-fresh .text-button { margin: 12px 0 0; }
+
+.invite-code-row {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.invite-code-row code {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  overflow-x: auto;
+  padding: 11px 12px;
+  /* Selectable by hand, because the clipboard is allowed to refuse. */
+  user-select: all;
+  white-space: nowrap;
+}
+
+.invite-code-row button {
+  background: var(--accent);
+  border-radius: 8px;
+  color: #21120f;
+  flex: none;
+  font-weight: 800;
+  padding: 11px 16px;
+}
+
+/* The call link appears here only when the clipboard refused it. */
+.voice-link-row {
+  padding: 0 12px 10px;
+}
+
+.voice-link-row input {
+  background: #17181c;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 8px 10px;
+  width: 100%;
+}

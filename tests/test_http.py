@@ -79,10 +79,11 @@ class HTTPTests(unittest.TestCase):
         connection.close()
         return response.status, payload, session
 
-    def raw_get(self, path):
+    def raw_get(self, path, cookie=None):
         """Return an unparsed response for static-file and header assertions."""
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        connection.request("GET", path)
+        headers = {"Cookie": f"campfire_session={cookie}"} if cookie else {}
+        connection.request("GET", path, headers=headers)
         response = connection.getresponse()
         status = response.status
         headers = response.getheaders()
@@ -1168,7 +1169,9 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["status"], "ready")
         self.assertEqual(payload["checks"], {"database": "ok", "storage": "ok"})
-        self.assertIsInstance(payload["warnings"], list)
+        # Capacity describes the people using the instance, so an endpoint
+        # anybody on the internet may call must not report it.
+        self.assertNotIn("warnings", payload)
 
     def test_readiness_fails_closed_without_disclosing_database_errors(self):
         with patch.object(campfire_http, "connect",
@@ -1196,6 +1199,115 @@ class HTTPTests(unittest.TestCase):
         status, payload, _ = self.request("POST", "/api/communities", ["not", "an", "object"], cookie=token)
         self.assertEqual(status, 400)
         self.assertIn("JSON object", payload["error"])
+
+    def test_message_creation_has_a_ceiling_slow_mode_does_not_provide(self):
+        """Slow mode is per-channel, off by default, and exempts moderators.
+        This is the floor underneath it, so a runaway client cannot fill a disk."""
+        member = self.signed_in_user(f"flood_author_{time.time_ns()}")
+        with patch.object(campfire_http, "MESSAGE_LIMITER",
+                          security.RateLimiter(attempts=3, window=60)):
+            for index in range(3):
+                status, _, _ = self.request(
+                    "POST", f"/api/channels/{self.channel_id}/messages",
+                    {"body": f"burst {index}"}, cookie=member)
+                self.assertEqual(status, 201)
+            status, payload, _ = self.request(
+                "POST", f"/api/channels/{self.channel_id}/messages",
+                {"body": "one message too many"}, cookie=member)
+        self.assertEqual(status, 429)
+        self.assertIn("faster than", payload["error"])
+        with database.connect() as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM messages WHERE body=?",
+                                         ("one message too many",)).fetchone())
+
+    def test_a_moderator_cannot_delete_the_community_owners_message(self):
+        username = f"rank_moderator_{time.time_ns()}"
+        moderator = self.signed_in_user(username)
+        with database.connect() as db:
+            db.execute("UPDATE memberships SET role='moderator' WHERE community_id=? AND user_id=?",
+                       (self.community_id, self.user_id_for(username)))
+        owner_message = self.post_message(self.owner_session, "the owner speaking")
+        status, payload, _ = self.request(
+            "DELETE", f"/api/messages/{owner_message['id']}", cookie=moderator)
+        self.assertEqual(status, 403)
+        self.assertIn("ranked above", payload["error"])
+        status, _, _ = self.request(
+            "DELETE", f"/api/messages/{owner_message['id']}", cookie=self.owner_session)
+        self.assertEqual(status, 200)
+
+    def test_history_beyond_one_page_stays_reachable_backwards(self):
+        """Every message must be readable, not only the newest page of them."""
+        member = self.signed_in_user(f"history_reader_{time.time_ns()}")
+        with database.connect() as db:
+            channel_id = db.execute(
+                "INSERT INTO channels(community_id,name,created_at) VALUES(?,?,?)",
+                (self.community_id, f"history-{time.time_ns()}", database.utc_now())).lastrowid
+            written = [db.execute(
+                "INSERT INTO messages(channel_id,author_id,body,created_at) VALUES(?,?,?,?)",
+                (channel_id, self.owner_id, f"message {index}", database.utc_now())).lastrowid
+                for index in range(campfire_http.MESSAGE_PAGE_SIZE + 30)]
+
+        status, page, _ = self.request(
+            "GET", f"/api/channels/{channel_id}/messages", cookie=member)
+        self.assertEqual(status, 200)
+        self.assertTrue(page["has_more"])
+        newest = [message["id"] for message in page["messages"]]
+        self.assertEqual(newest, written[-campfire_http.MESSAGE_PAGE_SIZE:])
+
+        status, earlier, _ = self.request(
+            "GET", f"/api/channels/{channel_id}/messages?before={newest[0]}", cookie=member)
+        self.assertEqual(status, 200)
+        older = [message["id"] for message in earlier["messages"]]
+        self.assertEqual(older, written[:30])
+        # The oldest message in the channel has been reached, so a client must
+        # not be offered a page that would come back empty.
+        self.assertFalse(earlier["has_more"])
+        self.assertEqual(older + newest, written)
+
+    def test_history_paging_stays_inside_the_caller_s_communities(self):
+        outsider = self.signed_in_user(f"history_outsider_{time.time_ns()}", member=False)
+        status, payload, _ = self.request(
+            "GET", f"/api/channels/{self.channel_id}/messages?before=999999", cookie=outsider)
+        self.assertEqual(status, 403)
+        self.assertIn("No access", payload["error"])
+
+    def test_unparsable_history_bounds_fall_back_to_the_newest_page(self):
+        member = self.signed_in_user(f"history_bounds_{time.time_ns()}")
+        self.post_message(member, "a message that must still be returned")
+        status, payload, _ = self.request(
+            "GET", f"/api/channels/{self.channel_id}/messages?before=nonsense&after=-4",
+            cookie=member)
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["messages"])
+
+    def test_bootstrap_publishes_the_upload_ceiling_it_enforces(self):
+        """The client refuses an oversized image locally, so it must be told the
+        same limit rather than assume the default."""
+        member = self.signed_in_user(f"limits_reader_{time.time_ns()}")
+        with patch.object(campfire_http, "MAX_UPLOAD_BYTES", 3 * 1024 * 1024):
+            status, payload, _ = self.request("GET", "/api/bootstrap", cookie=member)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["limits"]["max_upload_bytes"], 3 * 1024 * 1024)
+
+    def test_attachment_length_is_measured_from_the_file_that_is_sent(self):
+        """The body is streamed from disk, so a stale recorded size must not
+        become the declared Content-Length."""
+        member = self.signed_in_user(f"attachment_length_{time.time_ns()}")
+        storage_name = f"{secrets.token_hex(8)}.png"
+        content = b"\x89PNG\r\n\x1a\n" + b"padding bytes"
+        config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        (config.UPLOAD_DIR / storage_name).write_bytes(content)
+        with database.connect() as db:
+            attachment_id = db.execute("""INSERT INTO attachments
+              (channel_id,uploader_id,storage_name,original_name,mime_type,byte_size,created_at)
+              VALUES(?,?,?,?,?,?,?)""",
+              (self.channel_id, self.owner_id, storage_name, "drifted.png",
+               "image/png", len(content) + 4096, database.utc_now())).lastrowid
+        status, headers, body = self.raw_get(f"/api/attachments/{attachment_id}",
+                                             cookie=member)
+        self.assertEqual(status, 200)
+        self.assertEqual(dict(headers)["Content-Length"], str(len(content)))
+        self.assertEqual(body, content)
 
 
 if __name__ == "__main__":

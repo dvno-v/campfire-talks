@@ -18,8 +18,13 @@
 		output discard
 	}
 
+	# The proxy's ceiling, which must stay above CAMPFIRE_MAX_UPLOAD_BYTES plus
+	# request overhead. Caddy refuses a larger body before Campfire ever sees
+	# it, so a mismatch produces an error the application never wrote and
+	# cannot explain. Both values are set together in .env; see
+	# docs/SELF-HOSTING.md#image-size-limits.
 	request_body {
-		max_size 9MB
+		max_size {$CAMPFIRE_MAX_REQUEST_BODY:9MB}
 	}
 
 	reverse_proxy campfire:8000 {

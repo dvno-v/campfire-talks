@@ -141,7 +141,28 @@ async function copyCallLink() {
   try {
     await navigator.clipboard.writeText(link);
     setCallStatus('Encrypted call link copied. Send it through a trusted private channel.', 'good');
-  } catch { prompt('Copy this encrypted call link:', link); }
+  } catch {
+    // The link carries the call key, so it is never handed to a browser dialog
+    // that may be suppressed. Put it where it can be selected and copied by
+    // hand instead, and say why.
+    report('The browser refused clipboard access. The call link is in the box below — select it and copy it by hand.', 'warn');
+    revealCallLink(link);
+  }
+}
+
+function revealCallLink(link) {
+  const field = $('#voice-link');
+  if (!field) return;
+  field.value = link;
+  field.closest('.voice-link-row')?.classList.remove('hidden');
+  field.focus(); field.select();
+}
+
+// app.js owns the toast region and loads after this file, so the lookup happens
+// at call time. A missing one is not worth losing the message over.
+function report(message, tone = 'error') {
+  if (window.CampfireToast) window.CampfireToast(message, tone);
+  else setCallStatus(message, tone === 'error' ? 'warn' : tone);
 }
 
 function metadataFingerprint(participant) {
@@ -427,7 +448,7 @@ async function finishLeave(message = '') {
       });
     } catch { /* The lease expires quickly if the network is already gone. */ }
   }
-  if (message) alert(message);
+  if (message) report(message);
 }
 
 async function leave(message = '') {

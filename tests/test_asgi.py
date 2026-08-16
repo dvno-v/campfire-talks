@@ -3,7 +3,9 @@
 import asyncio
 import json
 import os
+import queue
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +14,7 @@ temporary = tempfile.TemporaryDirectory()
 os.environ.setdefault("CAMPFIRE_DB", str(Path(temporary.name) / "asgi.db"))
 os.environ.setdefault("CAMPFIRE_UPLOAD_DIR", str(Path(temporary.name) / "uploads"))
 
-from campfire.asgi import JSON_BODY_LIMIT, application, serve
+from campfire.asgi import JSON_BODY_LIMIT, _ResponseBridge, application, serve
 
 
 async def invoke(method, path, body=b"", headers=None):
@@ -65,6 +67,44 @@ class ASGITests(unittest.TestCase):
             "POST", "/api/login", b"{}", headers=headers))
         self.assertEqual(status, 401)
         self.assertEqual(json.loads(body)["error"], "Incorrect username or password")
+
+    def test_response_bridge_hands_every_chunk_over_in_order(self):
+        """The sender waits on an event rather than a timer.
+
+        An event stream stays open for hours while producing almost nothing, so
+        the handoff has to cost nothing while it is idle — and still lose
+        nothing when a chunk is queued during a drain.
+        """
+        async def scenario():
+            bridge = _ResponseBridge(asyncio.get_running_loop())
+            produced = [("start", 200, [])]
+            produced += [("body", str(index).encode()) for index in range(40)]
+            produced.append(("done", None))
+            writer = threading.Thread(target=lambda: [bridge.put(item) for item in produced])
+            writer.start()
+            collected = []
+            while not (collected and collected[-1][0] == "done"):
+                await asyncio.wait_for(bridge.wait(), timeout=5)
+                while True:
+                    try:
+                        collected.append(bridge.items.get_nowait())
+                    except queue.Empty:
+                        break
+            writer.join(timeout=5)
+            return collected, produced
+
+        collected, produced = asyncio.run(scenario())
+        self.assertEqual(collected, produced)
+
+    def test_response_bridge_refuses_to_write_a_body_to_a_gone_client(self):
+        async def scenario():
+            bridge = _ResponseBridge(asyncio.get_running_loop())
+            bridge.disconnected.set()
+            return bridge
+
+        bridge = asyncio.run(scenario())
+        with self.assertRaises(BrokenPipeError):
+            bridge.put(("body", b"nobody is listening"))
 
     def test_uvicorn_process_has_finite_connection_and_timeout_settings(self):
         with patch("uvicorn.run") as run:
