@@ -7,5 +7,5 @@ pyasn1==0.6.4
 pyasn1-modules==0.4.2
 pycparser==3.0
 pyOpenSSL==26.4.0
-uvicorn==0.51.0
+uvicorn==0.52.3
 webauthn==3.0.0
