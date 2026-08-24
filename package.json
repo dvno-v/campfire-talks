@@ -7,9 +7,9 @@
     "build:e2ee": "esbuild frontend/e2ee-worker.js --bundle --minify --format=esm --platform=browser --target=es2022 --outfile=static/livekit-e2ee-worker.js"
   },
   "dependencies": {
-    "livekit-client": "2.21.0"
+    "livekit-client": "2.22.0"
   },
   "devDependencies": {
-    "esbuild": "0.25.9"
+    "esbuild": "0.28.2"
   }
 }
